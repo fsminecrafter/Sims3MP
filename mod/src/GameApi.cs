@@ -26,6 +26,11 @@ using Sims3.UI.Controller;
 using Flow = Sims3.Gameplay.Gameflow;
 using GameSpeed = Sims3.SimIFace.Gameflow.GameSpeed;
 
+// The game's tuning loader (TuningControl.FindTunables) only looks at
+// assemblies that carry this attribute. Without it the Main class below is
+// never started, however correct the tuning XML is.
+[assembly: Tunable]
+
 namespace Sims3MP
 {
     /// <summary>Entry point. The game instantiates this class because of the
@@ -42,19 +47,38 @@ namespace Sims3MP
 
         static Main()
         {
-            World.OnWorldLoadFinishedEventHandler += new EventHandler(OnWorldLoaded);
-            World.OnWorldQuitEventHandler += new EventHandler(OnWorldQuit);
+            DiagLog.Write("Main: static constructor ran (the game started the mod)");
+            try
+            {
+                World.OnWorldLoadFinishedEventHandler += new EventHandler(OnWorldLoaded);
+                World.OnWorldQuitEventHandler += new EventHandler(OnWorldQuit);
+                // If the tuning pass happened after a world was already loaded, the event
+                // above has already fired for it.
+                if (GameStates.IsInWorld()) OnWorldLoaded(null, null);
+            }
+            catch (Exception ex) { DiagLog.Write("Main: startup failed: " + ex); }
         }
 
         static void OnWorldLoaded(object sender, EventArgs e)
         {
+            try { WorldLoaded(); }
+            catch (Exception ex) { DiagLog.Write("Main: OnWorldLoaded failed: " + ex); }
+        }
+
+        static void WorldLoaded()
+        {
+            DiagLog.Write("Main: world loaded");
             if (sGame == null)
             {
                 NativeTransport net = new NativeTransport();
                 sGame = new GameApi();
-                if (!net.Available)
+                int version = net.Version;
+                DiagLog.Write("Main: native version " + version);
+                if (version < NativeTransport.RequiredVersion)
                 {
-                    sGame.Notify("Sims3MP: the native part is not installed (MonoPatcher + Sims3MPNative.dll). Multiplayer is disabled.");
+                    sGame.Notify(version < 0
+                        ? "Sims3MP: the native part (Sims3MPNative.dll) is not installed or not loaded. Multiplayer is disabled."
+                        : "Sims3MP: the native part is out of date. Run setup.ps1 again. Multiplayer is disabled.");
                     sGame = null;
                     return;
                 }
@@ -81,27 +105,37 @@ namespace Sims3MP
         }
 
         // Runs every rendered frame, also while the simulation is paused.
+        static bool sTicked;
+
         static void OnTick(WindowBase sender, UIEventArgs e)
         {
             try
             {
+                if (!sTicked) { sTicked = true; DiagLog.Write("Main: first frame tick received"); }
                 sSession.Update();
                 sGame.Tick();
                 // The game's UI only reports keys bound in its own hotkey maps,
                 // so F9 is read by the native shim (only while the game has focus).
-                if (sNet.MenuKeyPressed()) OpenMenu();
+                if (sNet.MenuKeyPressed()) { DiagLog.Write("Main: F9 pressed"); OpenMenu(); }
             }
             catch (Exception ex)
             {
-                if (!sErrorShown) { sErrorShown = true; sGame.Notify("Sims3MP error: " + ex); }
+                DiagLog.Write("Main: tick failed: " + ex);
+                if (!sErrorShown) { sErrorShown = true; sGame.Notify("Sims3MP error: " + ex.Message); }
             }
         }
 
-        static int OnCommand(object[] parameters) { OpenMenu(); return 1; }
+        static int OnCommand(object[] parameters) { DiagLog.Write("Main: console command"); OpenMenu(); return 1; }
+
+        static void RunMenu()
+        {
+            try { sMenu.Open(); }
+            catch (Exception ex) { DiagLog.Write("Main: menu failed: " + ex); }
+        }
 
         static void OpenMenu()
         {
-            if (sGame != null) sGame.RunTask(sMenu.Open); // dialogs must run in a simulator task
+            if (sGame != null) sGame.RunTask(RunMenu); // dialogs must run in a simulator task
         }
     }
 
@@ -120,6 +154,7 @@ namespace Sims3MP
 
         public void Notify(string text)
         {
+            DiagLog.Write("notify: " + text);
             StyledNotification.Show(new StyledNotification.Format(text, StyledNotification.NotificationStyle.kSystemMessage));
         }
         public void RunTask(VoidHandler fn) { Simulator.AddObject(new Sims3.Gameplay.OneShotFunctionTask(new Sims3.Gameplay.Function(fn.Invoke))); }

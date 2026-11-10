@@ -83,6 +83,7 @@ namespace Sims3.Gameplay
     public static class GameStates
     {
         public static bool IsBuildBuyLikeState { get { return false; } }
+        public static bool IsInWorld() { return false; }
         public static void TransitionToLiveMode() { }
         public static string LoadFileName { get { return ""; } }
     }

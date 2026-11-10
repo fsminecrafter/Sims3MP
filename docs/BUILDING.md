@@ -53,6 +53,24 @@ This compiles `mod/src/*.cs` and packs the result with `cmd/sims3mp-pack`.
 uses, so CI can compile the mod without the game. Keep it in step with
 `GameApi.cs`.
 
+### How the game starts the mod
+
+Read from the game's own `TuningControl.FindTunables`: it goes through every
+loaded assembly that carries an **assembly-level `[Tunable]`** attribute, and
+for each static field marked `[Tunable]` it loads an XML named after the
+class and sets the field from `<Current_Tuning><field value="..."/>`. Setting
+the field runs the class's static constructor, which is how `Sims3MP.Main`
+hooks the world-loaded event. Without the assembly attribute nothing starts,
+however correct the XML is. The XML resource key is type `0x0333406C`,
+group 0, instance FNV-64 of the lower-cased class name (also from the game's
+code); `internal/dbpf` writes exactly that.
+
+### Diagnosing a run
+
+`native.log` (in `Documents\...\The Sims 3\Sims3MP\`) is written by the
+native DLL; the mod writes into it with `DiagLog.Write` because script mods
+cannot write files. `bridge.log` and `server.log` are next to it.
+
 ### If the package does not load
 
 The packer writes the S3SA script resource and DBPF container from their

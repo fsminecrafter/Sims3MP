@@ -4,7 +4,8 @@
 
 .EXAMPLE
   .\setup.ps1              Install into your game.
-  .\setup.ps1 -Test        Start two copies of the game on this PC to try multiplayer alone.
+  .\setup.ps1 -Test        Try multiplayer alone: one game plus a computer-controlled second player.
+  .\setup.ps1 -Test -TwoGames   Experimental: start two copies of the game instead.
   .\setup.ps1 -Server      Run a dedicated server on this PC (the game is not needed for this).
   .\setup.ps1 -Uninstall   Remove Sims3MP again.
   .\setup.ps1 -GameDir "D:\Games\The Sims 3"   Use this if the game is not found automatically.
@@ -12,6 +13,7 @@
 param(
     [string]$GameDir,
     [switch]$Test,
+    [switch]$TwoGames,
     [switch]$Server,
     [switch]$Uninstall,
     [int]$Port = 38920
@@ -19,7 +21,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Repo = 'fsminecrafter/Sims3MP'
-$PluginFiles = 'Sims3MPNative.dll', 'sims3mp-bridge.exe', 'sims3mp-server.exe'
+$PluginFiles = 'Sims3MPNative.dll', 'sims3mp-bridge.exe', 'sims3mp-server.exe', 'sims3mp-bot.exe'
 
 function Say($text)  { Write-Host $text }
 function Good($text) { Write-Host "  OK   $text" -ForegroundColor Green }
@@ -159,25 +161,56 @@ if ($Uninstall) {
 
 if ($Test) {
     $missing = $PluginFiles | Where-Object { -not (Test-Path (Join-Path $plugins $_)) }
-    if ($missing) { Fail "Sims3MP is not installed yet. Run .\setup.ps1 first." }
-    if (Get-Process TS3W, TS3 -ErrorAction SilentlyContinue) { Fail "Close The Sims 3 first: test mode starts the game itself." }
-    Get-Process sims3mp-bridge -ErrorAction SilentlyContinue | Stop-Process -Force
+    if ($missing) { Fail "Sims3MP is not installed yet (missing: $($missing -join ', ')). Run .\setup.ps1 first." }
 
-    # Each copy of the game gets its own bridge by using a different port.
+    if (-not $TwoGames) {
+        # One real game and a bot that plays the second player.
+        $bot = Join-Path $plugins 'sims3mp-bot.exe'
+        Say ""
+        Say "Test mode: you play in the game, and a bot joins as a second player."
+        Say ""
+        Say "  1. Start The Sims 3 the normal way and load the save you want to host."
+        Say "  2. Save it once, then press F9 > 'Host on this PC' > name: Host > port: $Port"
+        Say "  3. Press F9 > 'Copy world and start hosting' > type the save's name."
+        Say ""
+        Say "A second window ('Bot') opens now and joins by itself as soon as your server is up."
+        Say "In that window you can type: chat hello | sleep | wake | claim-lot <id> | players | help"
+        Say "  - 'sleep' while you are awake does nothing; fall asleep too and time jumps to 3x."
+        Say "  - 'claim-lot <id>' locks you out of that lot until the bot adds you as a builder."
+        Say ""
+        Start-Process -FilePath $bot -ArgumentList '-server', "127.0.0.1:$Port", '-name', 'Bot'
+        Say "Logs for the game side: $user\Sims3MP\native.log and bridge.log"
+        exit 0
+    }
+
+    # Experimental: two copies of the game. The Sims 3 may refuse to run twice.
+    if (Get-Process TS3W, TS3 -ErrorAction SilentlyContinue) { Fail "Close The Sims 3 first: this mode starts the games itself." }
+    Get-Process sims3mp-bridge -ErrorAction SilentlyContinue | Stop-Process -Force
+    Warn "Starting the game directly (not through its launcher). If it does not start,"
+    Warn "use plain  .\setup.ps1 -Test  instead: it needs only one game."
+    $workDir = Split-Path $gameExe
+    function Start-Game($bridgePort) {
+        $env:SIMS3MP_BRIDGE_PORT = "$bridgePort"
+        try { return Start-Process $gameExe -ArgumentList '-w' -WorkingDirectory $workDir -PassThru }
+        catch { Warn "Could not start the game: $($_.Exception.Message)"; return $null }
+        finally { Remove-Item Env:\SIMS3MP_BRIDGE_PORT -ErrorAction SilentlyContinue }
+    }
     Say ""
     Say "Starting game 1 (the HOST)..."
-    $env:SIMS3MP_BRIDGE_PORT = '38921'
-    $host1 = Start-Process $gameExe -ArgumentList '-w' -WorkingDirectory (Split-Path $gameExe) -PassThru
-    Say "Waiting 30 seconds before starting the second copy..."
-    Start-Sleep -Seconds 30
+    $host1 = Start-Game 38921
+    if (-not $host1) { exit 1 }
+    Say "Waiting 40 seconds for it to finish starting..."
+    Start-Sleep -Seconds 40
+    if ($host1.HasExited) { Fail "Game 1 closed again (exit code $($host1.ExitCode)). Look at the game's own error files in $user, and try plain  .\setup.ps1 -Test." }
     Say "Starting game 2 (the GUEST)..."
-    $env:SIMS3MP_BRIDGE_PORT = '38931'
-    $guest = Start-Process $gameExe -ArgumentList '-w' -WorkingDirectory (Split-Path $gameExe) -PassThru
-    Remove-Item Env:\SIMS3MP_BRIDGE_PORT
-    Start-Sleep -Seconds 15
-    if ($host1.HasExited -or $guest.HasExited) {
-        Warn "One of the two copies closed again. The game may refuse to run twice on this PC;"
-        Warn "in that case test with a second PC, or a second Windows user/virtual machine."
+    $guest = Start-Game 38931
+    Start-Sleep -Seconds 20
+    if (-not $guest -or $guest.HasExited) {
+        $code = ""
+        if ($guest) { $code = " (exit code $($guest.ExitCode))" }
+        Warn "Game 2 did not stay open$code. The Sims 3 most likely does not allow a second copy on this PC."
+        Warn "Use plain  .\setup.ps1 -Test  (one game plus a bot), or a second PC."
+        exit 1
     }
     Say ""
     Say "Both copies share your saves and mods. Now do this:"
@@ -192,7 +225,7 @@ if ($Test) {
     Say "    5. When it says the world is ready: go to the main menu and load the save it names"
     Say "    6. Press F9 > 'Enter the session'"
     Say ""
-    Say "Logs: $user\Sims3MP\bridge.log (host), bridge-38931.log (guest), server.log"
+    Say "Logs: $user\Sims3MP\native.log, bridge.log (host), bridge-38931.log (guest), server.log"
     exit 0
 }
 
@@ -232,8 +265,9 @@ if (-not (Test-Path (Join-Path $user 'Mods\Resource.cfg'))) {
 
 Say ""
 if ($ready) {
-    Say "Done! Start The Sims 3, load a save and press F9." 
-    Say "To try it alone with two copies of the game:  .\setup.ps1 -Test"
+    Say "Done! Start The Sims 3, load a save and press F9."
+    Say "To try it alone (one game plus a bot player):  .\setup.ps1 -Test"
+    Say "If F9 does nothing, send the files in $user\Sims3MP\ (native.log and bridge.log)."
 } else {
     Say "Almost there: fix the points marked with '!' above, then you can play."
 }
