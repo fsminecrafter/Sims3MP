@@ -77,6 +77,8 @@ function Get-ClientFiles {
     $have = { param($d) -not ($PluginFiles | Where-Object { -not (Test-Path (Join-Path $d "plugins\$_")) }) }
     if (& $have $PSScriptRoot) { Good "Using the files next to setup.ps1"; return $PSScriptRoot }  # unpacked release
     if (& $have $local) { Good "Using files from dist\client"; return $local }
+    $prebuilt = Join-Path $PSScriptRoot 'prebuilt\client'
+    if (& $have $prebuilt) { Good "Using the ready-made files in prebuilt\client"; return $prebuilt }
 
     Say "Downloading the latest release..."
     $tmp = Join-Path $env:TEMP "sims3mp-setup"
@@ -214,8 +216,8 @@ if (Test-Path $package) {
     Good "Installed Sims3MP.package into $mods"
 } else {
     $ready = $false
-    Warn "Sims3MP.package (the in-game part) is not available yet: it has to be"
-    Warn "compiled against the game's own files first. See docs\BUILDING.md, step 2."
+    Warn "Sims3MP.package (the in-game part) was not found next to the other files."
+    Warn "See docs\BUILDING.md, step 2, to build it."
 }
 if (-not (Test-Path (Join-Path $game 'Game\Bin\MonoPatcher.asi'))) {
     $ready = $false

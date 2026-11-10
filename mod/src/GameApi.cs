@@ -1,9 +1,9 @@
 // The only file that touches The Sims 3's own assemblies.
 //
-// IMPORTANT: this file was written without access to the game's DLLs. It is
-// compile-checked only against mod/stubs/Sims3Stubs.cs, which lists every
-// game type and member assumed here. Expect to adjust names/signatures when
-// first building against the real ScriptCore/SimIFace/Sims3GameplaySystems/UI.
+// It compiles against the real game assemblies (ScriptCore, SimIFace,
+// Sims3GameplaySystems, Sims3GameplayObjects, UI), so every name and
+// signature used here exists. It has not been run inside the game yet, so
+// behaviour (as opposed to names) is still unverified.
 using System;
 using System.Collections.Generic;
 using System.Reflection;
@@ -18,9 +18,13 @@ using Sims3.Gameplay.Socializing;
 using Sims3.Gameplay.CAS;
 using Sims3.Gameplay.Core;
 using Sims3.Gameplay.Interactions;
+using Sims3.Gameplay.Interfaces;
 using Sims3.Gameplay.Utilities;
 using Sims3.SimIFace;
 using Sims3.UI;
+using Sims3.UI.Controller;
+using Flow = Sims3.Gameplay.Gameflow;
+using GameSpeed = Sims3.SimIFace.Gameflow.GameSpeed;
 
 namespace Sims3MP
 {
@@ -31,14 +35,15 @@ namespace Sims3MP
         [Tunable] protected static bool kInstantiator = false;
 
         static GameApi sGame;
+        static NativeTransport sNet;
         static Session sSession;
         static Menu sMenu;
         static bool sCommand, sErrorShown;
 
         static Main()
         {
-            World.sOnWorldLoadFinishedEventHandler += new EventHandler(OnWorldLoaded);
-            World.sOnWorldQuitEventHandler += new EventHandler(OnWorldQuit);
+            World.OnWorldLoadFinishedEventHandler += new EventHandler(OnWorldLoaded);
+            World.OnWorldQuitEventHandler += new EventHandler(OnWorldQuit);
         }
 
         static void OnWorldLoaded(object sender, EventArgs e)
@@ -53,6 +58,7 @@ namespace Sims3MP
                     sGame = null;
                     return;
                 }
+                sNet = net;
                 sSession = new Session(net, sGame);
                 sMenu = new Menu(sSession, sGame);
             }
@@ -61,8 +67,6 @@ namespace Sims3MP
             WindowBase scene = UIManager.GetSceneWindow();
             scene.Tick -= OnTick;
             scene.Tick += OnTick;
-            scene.KeyDown -= OnKeyDown;
-            scene.KeyDown += OnKeyDown;
             if (!sCommand)
             {
                 sCommand = true; // cheat console fallback for F9: "sims3mp"
@@ -83,16 +87,14 @@ namespace Sims3MP
             {
                 sSession.Update();
                 sGame.Tick();
+                // The game's UI only reports keys bound in its own hotkey maps,
+                // so F9 is read by the native shim (only while the game has focus).
+                if (sNet.MenuKeyPressed()) OpenMenu();
             }
             catch (Exception ex)
             {
                 if (!sErrorShown) { sErrorShown = true; sGame.Notify("Sims3MP error: " + ex); }
             }
-        }
-
-        static void OnKeyDown(WindowBase sender, UIKeyEventArgs e)
-        {
-            if ((uint)e.KeyCode == 0x78) OpenMenu(); // VK_F9
         }
 
         static int OnCommand(object[] parameters) { OpenMenu(); return 1; }
@@ -120,7 +122,7 @@ namespace Sims3MP
         {
             StyledNotification.Show(new StyledNotification.Format(text, StyledNotification.NotificationStyle.kSystemMessage));
         }
-        public void RunTask(VoidHandler fn) { Simulator.AddObject(new OneShotFunctionTask(new Function(fn.Invoke))); }
+        public void RunTask(VoidHandler fn) { Simulator.AddObject(new Sims3.Gameplay.OneShotFunctionTask(new Sims3.Gameplay.Function(fn.Invoke))); }
         public void Message(string title, string text) { SimpleMessageDialog.Show(title, text); }
         public string Ask(string title, string prompt, string initial) { return StringInputDialog.Show(title, prompt, initial ?? ""); }
         public bool Confirm(string text) { return TwoButtonDialog.Show(text, "Yes", "No"); }
@@ -129,28 +131,37 @@ namespace Sims3MP
 
         public bool InWorld { get { return WorldLoaded; } }
 
-        // No confirmed script API for the current save's name; the menu offers
-        // "Enter the session" so the player confirms it instead.
-        public string SaveName { get { return ""; } }
+        // The file the world was loaded from, e.g. "Town.sims3" -> "Town".
+        public string SaveName
+        {
+            get
+            {
+                string name = GameStates.LoadFileName ?? "";
+                int slash = Math.Max(name.LastIndexOf('\\'), name.LastIndexOf('/'));
+                if (slash >= 0) name = name.Substring(slash + 1);
+                if (name.EndsWith(".sims3", StringComparison.OrdinalIgnoreCase)) name = name.Substring(0, name.Length - 6);
+                return name;
+            }
+        }
 
         public int Speed
         {
             get
             {
-                switch (Gameflow.CurrentGameSpeed)
+                switch (Flow.CurrentGameSpeed)
                 {
-                    case Gameflow.GameSpeed.Pause: return 0;
-                    case Gameflow.GameSpeed.Normal: return 1;
-                    case Gameflow.GameSpeed.Double: return 2;
+                    case GameSpeed.Pause: return 0;
+                    case GameSpeed.Normal: return 1;
+                    case GameSpeed.Double: return 2;
                     default: return 3;
                 }
             }
             set
             {
-                Gameflow.GameSpeed s = value <= 0 ? Gameflow.GameSpeed.Pause
-                    : value == 1 ? Gameflow.GameSpeed.Normal
-                    : value == 2 ? Gameflow.GameSpeed.Double : Gameflow.GameSpeed.Triple;
-                if (Gameflow.CurrentGameSpeed != s) Gameflow.SetGameSpeed(s, Gameflow.SetGameSpeedContext.GameStates);
+                GameSpeed s = value <= 0 ? GameSpeed.Pause
+                    : value == 1 ? GameSpeed.Normal
+                    : value == 2 ? GameSpeed.Double : GameSpeed.Triple;
+                if (Flow.CurrentGameSpeed != s) Flow.SetGameSpeed(s, Flow.SetGameSpeedContext.GameStates);
             }
         }
 
@@ -226,8 +237,7 @@ namespace Sims3MP
 
         public void ExitBuildBuy()
         {
-            InWorldState state = GameStates.GetInWorldState();
-            if (state != null) state.GotoLiveMode();
+            GameStates.TransitionToLiveMode();
         }
 
         public string LotName(ulong id)
@@ -388,7 +398,7 @@ namespace Sims3MP
                     if (sim.SkillManager == null) return false;
                     int at = into.Length, n = 0;
                     into.U16(0);
-                    foreach (Skill skill in sim.SkillManager.List.Values)
+                    foreach (Skill skill in sim.SkillManager.List)
                     {
                         if (skill == null || n == 0xFFFF) continue;
                         into.U64((ulong)skill.Guid).U32((uint)skill.SkillLevel).F32(skill.SkillPoints);
@@ -470,7 +480,7 @@ namespace Sims3MP
                     Occupation job = sim.Occupation;
                     if (job != null && (guid == OccupationNames.Undefined || job.Guid != guid))
                     {
-                        job.LeaveJobNow(Career.LeaveJobReason.kQuit);
+                        job.LeaveJob(false, Career.LeaveJobReason.kQuit);
                         job = null;
                     }
                     if (guid == OccupationNames.Undefined) return;
@@ -522,19 +532,86 @@ namespace Sims3MP
 
         // --- lot structure and object design -----------------------------
         //
-        // NOT IMPLEMENTED on the game side. Everything around these hooks is
-        // done and tested (change detection, permissions, transport, storage,
-        // replay to late joiners): a lot's walls, floors, roofs, terrain and
-        // coverings are one blob, an object's colours/patterns are
-        // ObjState.Design. What is missing is reading them from and writing
-        // them to the game, and the script functions for that could not be
-        // confirmed without the game's assemblies. They are deliberately left
-        // empty rather than filled with guessed function names.
+        // What the game lets a script read and write: terrain heights, the
+        // auto-roof style, and an object's design preset. Walls, floors and
+        // wall/floor coverings have no script function for creating or
+        // changing them (only the interactive build tools do), so they are
+        // not part of the blob and do not sync.
 
-        public bool ReadLotStructure(ulong lot, Buf into) { return false; }
-        public void ApplyLotStructure(ulong lot, Rd from) { }
-        static byte[] ReadDesign(GameObject obj) { return null; }
-        static void ApplyDesign(GameObject obj, byte[] design) { }
+        const float kHeightStep = 1f / 64f; // heights are quantised so both ends produce identical bytes
+
+        // Samples the lot on a one-unit grid between its four corners.
+        static bool LotGrid(ulong lotId, out LotCorners c, out int nx, out int nz)
+        {
+            c = World.LotGetCorners(lotId);
+            float dx = c.mCorner1.x - c.mCorner0.x, dz = c.mCorner1.z - c.mCorner0.z;
+            float ex = c.mCorner3.x - c.mCorner0.x, ez = c.mCorner3.z - c.mCorner0.z;
+            nx = (int)Math.Round(Math.Sqrt(dx * dx + dz * dz));
+            nz = (int)Math.Round(Math.Sqrt(ex * ex + ez * ez));
+            return nx >= 1 && nz >= 1 && nx <= 128 && nz <= 128;
+        }
+
+        static void GridPoint(LotCorners c, int nx, int nz, int i, int k, out float x, out float z)
+        {
+            float u = (float)i / nx, v = (float)k / nz;
+            x = c.mCorner0.x + (c.mCorner1.x - c.mCorner0.x) * u + (c.mCorner3.x - c.mCorner0.x) * v;
+            z = c.mCorner0.z + (c.mCorner1.z - c.mCorner0.z) * u + (c.mCorner3.z - c.mCorner0.z) * v;
+        }
+
+        public bool ReadLotStructure(ulong lot, Buf into)
+        {
+            LotCorners c; int nx, nz;
+            if (LotManager.GetLot(lot) == null || !LotGrid(lot, out c, out nx, out nz)) return false;
+            ResourceKey roof = World.LotGetAutoRoofStyle(lot);
+            into.U8(1).U64(roof.InstanceId).U32(roof.TypeId).U32(roof.GroupId).U8((byte)nx).U8((byte)nz);
+            for (int k = 0; k <= nz; k++)
+                for (int i = 0; i <= nx; i++)
+                {
+                    float x, z;
+                    GridPoint(c, nx, nz, i, k, out x, out z);
+                    into.U32((uint)(int)Math.Round(World.GetTerrainHeight(x, z) / kHeightStep));
+                }
+            return true;
+        }
+
+        public void ApplyLotStructure(ulong lot, Rd from)
+        {
+            LotCorners c; int nx, nz;
+            if (LotManager.GetLot(lot) == null || !LotGrid(lot, out c, out nx, out nz)) return;
+            if (from.U8() != 1) return;
+            ResourceKey roof = new ResourceKey(from.U64(), from.U32(), from.U32());
+            if (from.U8() != nx || from.U8() != nz || from.Left < (nx + 1) * (nz + 1) * 4) return; // not the same lot shape
+            for (int k = 0; k <= nz; k++)
+                for (int i = 0; i <= nx; i++)
+                {
+                    int want = (int)from.U32();
+                    float x, z;
+                    GridPoint(c, nx, nz, i, k, out x, out z);
+                    if ((int)Math.Round(World.GetTerrainHeight(x, z) / kHeightStep) != want)
+                        World.LotSetTerrainHeight(lot, x, z, want * kHeightStep);
+                }
+            if (roof.InstanceId != 0 && !roof.Equals(World.LotGetAutoRoofStyle(lot)))
+            {
+                World.LotSetAutoRoofStyle(lot, roof);
+                if (World.LotGetIsAutoRoofEnabled(lot)) World.LotDoAutoRoof(lot);
+            }
+        }
+
+        // An object's colours and patterns are its design preset, an XML string.
+        static byte[] ReadDesign(GameObject obj)
+        {
+            string preset = ObjectDesigner.GetObjectDesignPreset(obj.ObjectId);
+            if (string.IsNullOrEmpty(preset)) return null;
+            byte[] data = System.Text.Encoding.UTF8.GetBytes(preset);
+            return data.Length > 60000 ? null : data;
+        }
+
+        static void ApplyDesign(GameObject obj, byte[] design)
+        {
+            string preset = System.Text.Encoding.UTF8.GetString(design, 0, design.Length);
+            if (preset != ObjectDesigner.GetObjectDesignPreset(obj.ObjectId))
+                ObjectDesigner.SetPresetInfo(obj.ObjectId, preset);
+        }
 
         // --- build / buy -------------------------------------------------
 
@@ -614,7 +691,7 @@ namespace Sims3MP
                 long now = DateTime.UtcNow.Ticks / 10000;
                 if (now < mNextScan) return;
                 mNextScan = now + 30000;
-                mScan = Queries.GetObjects<GameObject>();
+                mScan = Sims3.Gameplay.Queries.GetObjects<GameObject>();
                 mScanPos = 0;
             }
             for (int i = 0; i < 150 && mScanPos < mScan.Length; i++, mScanPos++)

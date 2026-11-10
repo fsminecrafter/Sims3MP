@@ -1,7 +1,7 @@
 // NOT part of the mod. Minimal declarations of the game API surface that
-// mod/src/GameApi.cs assumes, so the mod can be compile-checked on machines
-// without The Sims 3. Written from memory of the public script API: treat
-// every line as "to be verified against the real assemblies". Never ship it.
+// mod/src/GameApi.cs uses, so the mod can be compile-checked on machines
+// without The Sims 3 (CI). Names and signatures were checked against the
+// real assemblies; bodies are empty. Never ship it.
 using System;
 using System.Collections.Generic;
 
@@ -17,8 +17,26 @@ namespace Sims3.SimIFace
     public struct ObjectGuid { public ulong Value; public ObjectGuid(ulong v) { Value = v; } }
     public static class World
     {
-        public static EventHandler sOnWorldLoadFinishedEventHandler;
-        public static EventHandler sOnWorldQuitEventHandler;
+        public static event EventHandler OnWorldLoadFinishedEventHandler;
+        public static event EventHandler OnWorldQuitEventHandler;
+        static void Raise() { if (OnWorldLoadFinishedEventHandler != null) OnWorldLoadFinishedEventHandler(null, null); if (OnWorldQuitEventHandler != null) OnWorldQuitEventHandler(null, null); }
+        public static float GetTerrainHeight(float x, float z) { return 0f; }
+        public static void LotSetTerrainHeight(ulong lotId, float x, float z, float height) { }
+        public static LotCorners LotGetCorners(ulong lotId) { return new LotCorners(); }
+        public static ResourceKey LotGetAutoRoofStyle(ulong lotId) { return new ResourceKey(); }
+        public static void LotSetAutoRoofStyle(ulong lotId, ResourceKey key) { }
+        public static bool LotGetIsAutoRoofEnabled(ulong lotId) { return false; }
+        public static void LotDoAutoRoof(ulong lotId) { }
+    }
+    public class LotCorners { public Vector3 mCorner0, mCorner1, mCorner2, mCorner3; }
+    public static class ObjectDesigner
+    {
+        public static string GetObjectDesignPreset(ObjectGuid id) { return ""; }
+        public static void SetPresetInfo(ObjectGuid id, string presetXml) { }
+    }
+    public class Gameflow
+    {
+        public enum GameSpeed { Pause, Normal, Double, Triple, Skip }
     }
     public abstract class Task { public virtual void Simulate() { } }
     public static class Simulator { public static ObjectGuid AddObject(Task t) { return new ObjectGuid(); } }
@@ -34,13 +52,11 @@ namespace Sims3.SimIFace
 namespace Sims3.UI
 {
     public class UIEventArgs : EventArgs { }
-    public class UIKeyEventArgs : UIEventArgs { public uint KeyCode; }
     public delegate void UIEventHandler<T>(WindowBase sender, T args) where T : UIEventArgs;
     public class WindowBase
     {
         public event UIEventHandler<UIEventArgs> Tick;
-        public event UIEventHandler<UIKeyEventArgs> KeyDown;
-        protected void Raise() { if (Tick != null) Tick(this, null); if (KeyDown != null) KeyDown(this, null); }
+        protected void Raise() { if (Tick != null) Tick(this, null); }
     }
     public static class UIManager { public static WindowBase GetSceneWindow() { return new WindowBase(); } }
     public static class SimpleMessageDialog { public static void Show(string title, string message) { } }
@@ -60,25 +76,29 @@ namespace Sims3.Gameplay
     public class OneShotFunctionTask : Sims3.SimIFace.Task { public OneShotFunctionTask(Function f) { } }
     public static class Gameflow
     {
-        public enum GameSpeed { Pause, Normal, Double, Triple, Skip }
         public enum SetGameSpeedContext { GameStates }
-        public static GameSpeed CurrentGameSpeed { get { return GameSpeed.Normal; } }
-        public static void SetGameSpeed(GameSpeed s, SetGameSpeedContext c) { }
+        public static Sims3.SimIFace.Gameflow.GameSpeed CurrentGameSpeed { get { return Sims3.SimIFace.Gameflow.GameSpeed.Normal; } }
+        public static void SetGameSpeed(Sims3.SimIFace.Gameflow.GameSpeed s, SetGameSpeedContext c) { }
     }
-    public class InWorldState { public void GotoLiveMode() { } }
     public static class GameStates
     {
         public static bool IsBuildBuyLikeState { get { return false; } }
-        public static InWorldState GetInWorldState() { return null; }
+        public static void TransitionToLiveMode() { }
+        public static string LoadFileName { get { return ""; } }
     }
     public static class Queries { public static T[] GetObjects<T>() { return new T[0]; } }
+}
+
+namespace Sims3.Gameplay.Interfaces
+{
+    public interface IGameObject { Sims3.SimIFace.ObjectGuid ObjectId { get; } }
+    public interface IActor : IGameObject { }
 }
 
 namespace Sims3.Gameplay.Interactions
 {
     using Sims3.Gameplay.Abstracts;
-    public interface IGameObject { Sims3.SimIFace.ObjectGuid ObjectId { get; } }
-    public interface IActor : IGameObject { }
+    using Sims3.Gameplay.Interfaces;
     public enum InteractionPriorityLevel { UserDirected }
     public struct InteractionPriority { public InteractionPriority(InteractionPriorityLevel l) { } }
     public interface InteractionDefinition
@@ -93,6 +113,7 @@ namespace Sims3.Gameplay.Interactions
 namespace Sims3.Gameplay.Abstracts
 {
     using Sims3.Gameplay.Interactions;
+    using Sims3.Gameplay.Interfaces;
     using Sims3.SimIFace;
     public class GameObject : IGameObject
     {
@@ -127,6 +148,7 @@ namespace Sims3.Gameplay.Autonomy
 namespace Sims3.Gameplay.Actors
 {
     using Sims3.Gameplay.Interactions;
+    using Sims3.Gameplay.Interfaces;
     public class Sim : Sims3.Gameplay.Abstracts.GameObject, IActor
     {
         public Sims3.Gameplay.CAS.SimDescription SimDescription;
@@ -173,7 +195,7 @@ namespace Sims3.Gameplay.Core
     public class Lot { public ulong LotId; public string Name; public string Address; public bool IsWorldLot { get { return false; } } public T[] GetObjects<T>() { return new T[0]; } }
     public static class GlobalFunctions
     {
-        public static Sims3.Gameplay.Interactions.IGameObject CreateObjectOutOfWorld(ResourceKey key) { return null; }
+        public static Sims3.Gameplay.Interfaces.IGameObject CreateObjectOutOfWorld(ResourceKey key) { return null; }
     }
     public static class LotManager
     {
@@ -197,7 +219,7 @@ namespace Sims3.Gameplay.Skills
     }
     public class SkillManager
     {
-        public Dictionary<ulong, Skill> List = new Dictionary<ulong, Skill>();
+        public ICollection<Skill> List { get { return new List<Skill>(); } }
         public Skill GetElement(SkillNames guid) { return null; }
         public Skill AddElement(SkillNames guid) { return null; }
     }
@@ -213,7 +235,7 @@ namespace Sims3.Gameplay.Careers
         public int CareerLevel;
         public void PromoteSim() { }
         public void DemoteSim() { }
-        public void LeaveJobNow(Career.LeaveJobReason reason) { }
+        public void LeaveJob(bool showTNS, Career.LeaveJobReason reason) { }
     }
     public class Career : Occupation { public enum LeaveJobReason { kQuit } }
 }
@@ -234,7 +256,7 @@ namespace Sims3.Gameplay.ActorSystems
 namespace Sims3.Gameplay.Socializing
 {
     using Sims3.Gameplay.CAS;
-    public enum LongTermRelationshipTypes : uint { Undefined }
+    using Sims3.UI.Controller;
     public class LongTermRelationship
     {
         public float Liking;
@@ -249,4 +271,10 @@ namespace Sims3.Gameplay.Socializing
         public static List<Relationship> GetRelationships(SimDescription sim) { return new List<Relationship>(); }
         public static Relationship Get(SimDescription a, SimDescription b, bool create) { return null; }
     }
+}
+
+
+namespace Sims3.UI.Controller
+{
+    public enum LongTermRelationshipTypes : uint { Undefined }
 }

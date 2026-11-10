@@ -25,5 +25,10 @@ if command -v i686-w64-mingw32-g++ >/dev/null; then
 else
   echo "warning: i686-w64-mingw32-g++ not found, Sims3MPNative.dll not built" >&2
 fi
-echo "The script mod (mod/) must be compiled against the game's own DLLs: see docs/BUILDING.md"
+# The in-game part needs the game's own DLLs to compile (scripts/build-mod.sh),
+# so the last built package is kept in prebuilt/ and shipped from there.
+if [ -f prebuilt/client/Sims3MP.package ]; then cp prebuilt/client/Sims3MP.package dist/client/; fi
+if [ "${1:-}" = "--prebuilt" ]; then
+  mkdir -p prebuilt/client/plugins && cp dist/client/plugins/* prebuilt/client/plugins/
+fi
 ls -l dist/server dist/client/plugins

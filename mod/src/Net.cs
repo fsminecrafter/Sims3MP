@@ -22,6 +22,10 @@ namespace Sims3MP
         [DllImport("Sims3MPNative.dll")] static extern int MP_Send(byte[] body, int len);
         [DllImport("Sims3MPNative.dll")] static extern int MP_Recv(byte[] buffer, int cap);
         [DllImport("Sims3MPNative.dll")] static extern int MP_Version();
+        [DllImport("Sims3MPNative.dll")] static extern int MP_MenuKey();
+
+        /// <summary>True once per press of F9 while the game window has focus.</summary>
+        public bool MenuKeyPressed() { return !mBroken && MP_MenuKey() == 1; }
 
         bool mBroken;
 

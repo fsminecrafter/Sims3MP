@@ -213,7 +213,22 @@ MP_EXPORT int __stdcall MP_Recv(uint8_t* buf, int cap) {
     return (int)n;
 }
 
-MP_EXPORT int __stdcall MP_Version() { return 1; }
+// Returns 1 once per press of F9, and only while a window of this process
+// has keyboard focus. The game's script UI cannot see unbound keys.
+MP_EXPORT int __stdcall MP_MenuKey() {
+    static bool wasDown = false;
+    bool down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+    bool pressed = down && !wasDown;
+    wasDown = down;
+    if (!pressed) return 0;
+    DWORD pid = 0;
+    HWND fg = GetForegroundWindow();
+    if (!fg) return 0;
+    GetWindowThreadProcessId(fg, &pid);
+    return pid == GetCurrentProcessId() ? 1 : 0;
+}
+
+MP_EXPORT int __stdcall MP_Version() { return 2; }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {

@@ -3,9 +3,10 @@
 Play the same Sims 3 town with your friends. Everyone controls their own
 household, on their own PC, in the same world.
 
-> **Heads up — this is not playable yet.** The server and most of the mod are
-> written and tested, but the piece that plugs into the game has never been
-> run inside The Sims 3. See [Where the project stands](#where-the-project-stands).
+> **Heads up — this is an untested first build.** Everything compiles against
+> the real game and the logic is tested outside it, but nobody has run it
+> inside The Sims 3 yet. Expect bugs; keep a backup of your saves.
+> See [Where the project stands](#where-the-project-stands).
 
 ## What you need
 
@@ -15,7 +16,7 @@ household, on their own PC, in the same world.
 
 ## Install
 
-1. Download this project and unpack it.
+1. Download this project and unpack it (it includes ready-made files in `prebuilt\`).
 2. Close The Sims 3.
 3. Right-click `setup.ps1` and choose **Run with PowerShell**.
 
@@ -52,6 +53,7 @@ powershell -ExecutionPolicy Bypass -File .\setup.ps1
 4. Press **F9 > Choose household** to pick who you play.
 
 If F9 does nothing, open the cheat console (Ctrl+Shift+C) and type `sims3mp`.
+If neither works, the mod did not load: see *Not working or not proven yet* below.
 
 ## The rules
 
@@ -62,7 +64,7 @@ If F9 does nothing, open the cheat console (Ctrl+Shift+C) and type `sims3mp`.
 | **Money and needs** | Follow the player who owns the household, and are restored if you reload. |
 | **Skills, careers, moodlets, relationships** | Same: the owner's game decides, everyone else's copy follows. |
 | **Lots** | Move in and the lot is yours. Only you, builders you appoint (F9 > Lots and builders), and the admin can build there. |
-| **Build/buy** | Furniture and objects you place, move or delete show up for everyone. |
+| **Build/buy** | Objects you place, move, recolour or delete show up for everyone. So do terrain changes and the roof style. **Walls and floors do not** (see below). |
 | **Mods like NRaas** | Allowed. Only the admin gets their menus. |
 | **Voice chat** | Built in. People get quieter as your camera moves away from them. |
 
@@ -105,22 +107,24 @@ the mod's real logic against a real server with a simulated game):
 
 Not working or not proven yet:
 
-- **The in-game part has never run in The Sims 3.** `mod/src/GameApi.cs` was
-  written from memory of the game's API without the game's files. It will
-  need fixes on the first real build, and `Sims3MP.package` must be built by
-  someone who owns the game ([docs/BUILDING.md](docs/BUILDING.md)).
-- `setup.ps1`, test mode, the native DLL and the Windows audio code compile
-  or are written carefully, but have not been run on Windows.
+- **Nothing has been run inside The Sims 3 yet.** The in-game code
+  (`mod/src/GameApi.cs`) now compiles against the real game files, so every
+  game function it calls exists — but whether each one *behaves* as
+  expected is unknown until someone plays it.
+- **`Sims3MP.package` might not load.** It is written by this project's own
+  packer instead of S3PE and has not been compared with a real one. If you
+  see no "Sims3MP loaded" message after loading a save, build the package
+  with S3PE instead ([docs/BUILDING.md](docs/BUILDING.md)).
+- `setup.ps1`, test mode, the native DLL and the Windows audio code have not
+  been run on a real setup beyond the first steps of `setup.ps1`.
 - Whether The Sims 3 allows two copies to run at once is unconfirmed.
-- **Walls, floors, roofs, terrain, wallpaper and object colours/patterns:
-  half done.** Everything around them works and is tested (detecting
-  changes, build permissions, sending, storing on the server, restoring for
-  late joiners). The last step — reading them out of the game and writing
-  them back in — is not written, because the game functions for it could
-  not be confirmed without the game's files. Until that is filled in
-  (four small functions in `GameApi.cs`), these do not sync in the game.
-- Skills, careers, moodlets and relationships are written against the game
-  API from memory, like the rest of `GameApi.cs`, and are just as unproven.
+- **Walls, floors, wallpaper and floor coverings do not sync, and cannot
+  with this approach.** The game gives script mods no function to create or
+  change them; only the interactive build tools can. What does sync:
+  objects and their colours/patterns, terrain height, and the automatic
+  roof style. Until this is solved another way, the host should use *Copy
+  world and start hosting* again after anyone changes walls or floors.
+- Roofs drawn by hand are not synced, only the auto-roof style.
 - Not synced at all: inventories, wishes, opportunities, traits, pregnancy
   and ageing, the family tree, and anything town-wide such as story progression.
 - If the host reloads their own save, they should use *Copy world and start
