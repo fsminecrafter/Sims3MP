@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Tuning resource that makes the game instantiate Sims3MP.Main at startup.
+     Import into the .package as type _XML (0x0333406C), group 0,
+     instance = FNV-64 hash of "Sims3MP.Main". -->
+<base>
+  <Current_Tuning>
+    <kInstantiator value="True" />
+  </Current_Tuning>
+</base>
