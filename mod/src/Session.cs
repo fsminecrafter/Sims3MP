@@ -43,6 +43,27 @@ namespace Sims3MP
         readonly Dictionary<ulong, string> mLastInteraction = new Dictionary<ulong, string>();
         readonly Dictionary<ulong, bool> mAskedLots = new Dictionary<ulong, bool>();
 
+        // Operation log position: lets a reconnect resume instead of replaying.
+        ulong mLastSeq;
+
+        // Needs + money of the household this player owns.
+        readonly Buf mVitals = new Buf();
+        readonly float[] mMotives = new float[6];
+        byte[] mLastVitals = new byte[0];
+        long mNextVitals, mVitalsForced;
+
+        // Build/buy replication. Objects that exist in the hosted save have
+        // the same id on every client; objects created during the session
+        // are named by the sequence number of the operation that made them.
+        ulong mBuildLot;
+        long mNextScan;
+        readonly List<ObjState> mScan = new List<ObjState>();
+        readonly Dictionary<ulong, ObjState> mSent = new Dictionary<ulong, ObjState>();  // what the others have
+        readonly Dictionary<ulong, ObjState> mSeen = new Dictionary<ulong, ObjState>();  // previous scan
+        readonly Dictionary<ulong, ulong> mNetToLocal = new Dictionary<ulong, ulong>();
+        readonly Dictionary<ulong, ulong> mLocalToNet = new Dictionary<ulong, ulong>();
+        readonly Queue<ulong> mPendingCreates = new Queue<ulong>();
+
         public Session(ITransport net, IGame game) { mNet = net; mGame = game; }
 
         static long Now { get { return DateTime.UtcNow.Ticks / 10000; } }
@@ -109,6 +130,9 @@ namespace Sims3MP
                 BridgeUp = true;
                 mOut.Begin(Msg.LQuery); Send();
             }
+            // Look at the local speed before applying server messages: a clock
+            // update handled first would silently undo the admin's own change.
+            if (InSession && mGame.InWorld) SyncSpeed();
             for (int i = 0; i < 256; i++) // bounded work per frame: no hitching on bursts
             {
                 int n = mNet.Recv(mIn);
@@ -121,12 +145,12 @@ namespace Sims3MP
             {
                 if (InSession) Leave();
                 mReadySent = false; mNeedReload = false; mManualEnter = false;
+                ForgetWorld();
                 return;
             }
             if (!InSession) { TryEnter(); return; }
 
             long now = Now;
-            SyncSpeed();
             if (now >= mNextState) { mNextState = now + 33; SendSims(); }
             if (now >= mNextListener)
             {
@@ -137,6 +161,15 @@ namespace Sims3MP
             }
             if (now >= mNextSlow) { mNextSlow = now + 500; Slow(); }
             if (mGame.InBuildBuy) GuardBuild(now);
+            TrackBuild(now);
+        }
+
+        // Everything tied to the loaded copy of the world.
+        void ForgetWorld()
+        {
+            mLastSeq = 0;
+            mNetToLocal.Clear();
+            mLocalToNet.Clear();
         }
 
         void Leave()
@@ -147,6 +180,11 @@ namespace Sims3MP
             mClaimed = 0;
             mLastInteraction.Clear();
             mAskedLots.Clear();
+            mPendingCreates.Clear();
+            mBuildLot = 0;
+            mSent.Clear();
+            mSeen.Clear();
+            mLastVitals = new byte[0];
             mGame.RestrictAdminMods(false);
         }
 
@@ -159,7 +197,7 @@ namespace Sims3MP
             if (!match) return;
             mReadySent = true;
             mGame.Speed = 0; mApplied = 0; // paused until the server's snapshot and clock arrive
-            mOut.Begin(Msg.CReady); Send();
+            mOut.Begin(Msg.CReady).U64(mLastSeq); Send();
         }
 
         void SyncSpeed()
@@ -210,7 +248,7 @@ namespace Sims3MP
                 if (string.IsNullOrEmpty(s.Interaction)) continue;
                 Buf p = new Buf();
                 p.Begin(Msg.OpInteraction).U64(s.SimId).Str(s.Interaction).U64(s.Target);
-                mOut.Begin(Msg.COp).U8(Msg.OpGeneral).U64(0).U64(house).Bytes(p.Data, p.Length); Send();
+                mOut.Begin(Msg.COp).U8(Msg.OpGeneral | Msg.OpTransient).U64(0).U64(house).Bytes(p.Data, p.Length); Send();
             }
         }
 
@@ -244,6 +282,8 @@ namespace Sims3MP
                 }
             }
 
+            if (house != 0 && house == mClaimed && Now >= mNextVitals) { mNextVitals = Now + 1000; SendVitals(house); }
+
             // Moving a household onto a lot (buying it) makes this player its owner.
             ulong home = mGame.HomeLot;
             if (home != 0 && house == mClaimed && !Lots.ContainsKey(home) && !mAskedLots.ContainsKey(home))
@@ -265,6 +305,207 @@ namespace Sims3MP
                 mGame.Notify(owner.Length > 0
                     ? "This lot belongs to " + owner + ". Ask them to add you as a builder (F9 > Lots)."
                     : "Nobody owns this lot yet. Move your household in to buy it, or ask the admin.");
+            }
+        }
+
+        // --- needs and money ---------------------------------------------
+
+        // The player who owns a household is the authority on its funds and
+        // its sims' needs; everybody else's game is overwritten with them.
+        void SendVitals(ulong house)
+        {
+            mSims.Clear();
+            mGame.ControlledSims(mSims);
+            mVitals.Length = 0;
+            mVitals.U32((uint)mGame.GetFunds(house));
+            int at = mVitals.Length, n = 0;
+            mVitals.U8(0);
+            for (int i = 0; i < mSims.Count && n < 32; i++)
+            {
+                if (!mGame.ReadMotives(mSims[i].SimId, mMotives)) continue;
+                mVitals.U64(mSims[i].SimId);
+                for (int k = 0; k < 6; k++) mVitals.F32(mMotives[k]);
+                n++;
+            }
+            mVitals.Data[at] = (byte)n;
+
+            bool same = mVitals.Length == mLastVitals.Length;
+            for (int i = 0; same && i < mVitals.Length; i++) same = mVitals.Data[i] == mLastVitals[i];
+            if (same && Now < mVitalsForced) return;
+            mVitalsForced = Now + 15000;
+            mLastVitals = new byte[mVitals.Length];
+            Array.Copy(mVitals.Data, mLastVitals, mVitals.Length);
+            mOut.Begin(Msg.CEntityData).U64(house).U8(Msg.SlotVitals).Bytes(mVitals.Data, mVitals.Length); Send();
+        }
+
+        void ApplyVitals(ulong house, Rd p)
+        {
+            int funds = (int)p.U32();
+            int n = p.U8();
+            if (p.Err) return;
+            mGame.SetFunds(house, funds);
+            for (int i = 0; i < n; i++)
+            {
+                ulong sim = p.U64();
+                for (int k = 0; k < 6; k++) mMotives[k] = p.F32();
+                if (p.Err) return;
+                mGame.ApplyMotives(sim, mMotives);
+            }
+        }
+
+        // --- build / buy -------------------------------------------------
+
+        static void WriteObj(Buf b, ObjState o)
+        {
+            b.U32(o.KeyType).U32(o.KeyGroup).U64(o.KeyInstance).F32(o.X).F32(o.Y).F32(o.Z).F32(o.FwdX).F32(o.FwdZ).U32((uint)o.Level);
+        }
+
+        static ObjState ReadObj(Rd r)
+        {
+            ObjState o = new ObjState();
+            o.KeyType = r.U32(); o.KeyGroup = r.U32(); o.KeyInstance = r.U64();
+            o.X = r.F32(); o.Y = r.F32(); o.Z = r.F32(); o.FwdX = r.F32(); o.FwdZ = r.F32();
+            o.Level = (int)r.U32();
+            return o;
+        }
+
+        // Writes a reference every client can resolve; false while this
+        // client's own create operation has not come back from the server.
+        bool WriteRef(Buf b, ulong local)
+        {
+            ulong net;
+            if (mLocalToNet.TryGetValue(local, out net)) { b.U8(1).U64(net); return true; }
+            if (mPendingCreates.Contains(local)) return false;
+            b.U8(0).U64(local);
+            return true;
+        }
+
+        ulong ReadRef(Rd r)
+        {
+            byte kind = r.U8(); ulong id = r.U64(), local;
+            if (kind == 0) return id;
+            return mNetToLocal.TryGetValue(id, out local) ? local : 0UL;
+        }
+
+        void SendBuild(ulong lot, Buf payload)
+        {
+            mOut.Begin(Msg.COp).U8(Msg.OpBuild).U64(lot).U64(0).Bytes(payload.Data, payload.Length); Send();
+        }
+
+        void TrackBuild(long now)
+        {
+            ulong lot = mGame.InBuildBuy ? mGame.BuildLot : 0UL;
+            if (lot != 0 && !CanBuild(lot)) lot = 0;
+            if (lot != mBuildLot)
+            {
+                if (mBuildLot != 0) ScanLot(mBuildLot, true); // leaving: publish what is left
+                mBuildLot = lot;
+                mSent.Clear(); mSeen.Clear();
+                if (lot != 0)
+                {
+                    // Whatever is on the lot now is what everyone already has.
+                    mScan.Clear();
+                    mGame.LotObjects(lot, mScan);
+                    for (int i = 0; i < mScan.Count; i++) { mSent[mScan[i].Id] = mScan[i]; mSeen[mScan[i].Id] = mScan[i]; }
+                    mNextScan = now + 400;
+                }
+                return;
+            }
+            if (lot != 0 && now >= mNextScan) { mNextScan = now + 400; ScanLot(lot, false); }
+        }
+
+        // Compares the lot with what was last published. Unless final, a change
+        // is only sent once it has been stable for one scan, so an object being
+        // dragged around produces one operation, not a stream of them.
+        void ScanLot(ulong lot, bool final)
+        {
+            mScan.Clear();
+            mGame.LotObjects(lot, mScan);
+            Buf p = new Buf();
+            Dictionary<ulong, bool> present = new Dictionary<ulong, bool>();
+            for (int i = 0; i < mScan.Count; i++)
+            {
+                ObjState cur = mScan[i], seen, sent;
+                present[cur.Id] = true;
+                bool stable = final || (mSeen.TryGetValue(cur.Id, out seen) && seen.Same(cur));
+                mSeen[cur.Id] = cur;
+                if (!stable) continue;
+                if (!mSent.TryGetValue(cur.Id, out sent))
+                {
+                    p.Length = 0;
+                    p.U8(Msg.BuildCreate).U64(cur.Id);
+                    WriteObj(p, cur);
+                    mPendingCreates.Enqueue(cur.Id);
+                    mSent[cur.Id] = cur;
+                    SendBuild(lot, p);
+                }
+                else if (!sent.Same(cur))
+                {
+                    p.Length = 0;
+                    p.U8(Msg.BuildMove);
+                    if (!WriteRef(p, cur.Id)) continue; // retry on the next scan
+                    WriteObj(p, cur);
+                    mSent[cur.Id] = cur;
+                    SendBuild(lot, p);
+                }
+            }
+            List<ulong> gone = new List<ulong>();
+            foreach (ulong id in mSent.Keys) if (!present.ContainsKey(id)) gone.Add(id);
+            for (int i = 0; i < gone.Count; i++)
+            {
+                p.Length = 0;
+                p.U8(Msg.BuildDelete);
+                if (!WriteRef(p, gone[i]) && !final) continue;
+                mSent.Remove(gone[i]); mSeen.Remove(gone[i]);
+                if (p.Length > 1) SendBuild(lot, p);
+                ulong net;
+                if (mLocalToNet.TryGetValue(gone[i], out net)) { mLocalToNet.Remove(gone[i]); mNetToLocal.Remove(net); }
+            }
+        }
+
+        void ApplyBuild(ulong seq, bool mine, ulong lot, Rd p)
+        {
+            byte kind = p.U8();
+            if (kind == Msg.BuildCreate)
+            {
+                p.U64();
+                ObjState o = ReadObj(p);
+                if (p.Err) return;
+                ulong local;
+                if (mine)
+                {
+                    // Our own object: now we know the name everyone uses for it.
+                    if (mPendingCreates.Count == 0) return;
+                    local = mPendingCreates.Dequeue();
+                }
+                else
+                {
+                    local = mGame.CreateObject(lot, o);
+                    if (local == 0) return;
+                    o.Id = local;
+                    if (lot == mBuildLot) { mSent[local] = o; mSeen[local] = o; }
+                }
+                mNetToLocal[seq] = local;
+                mLocalToNet[local] = seq;
+                return;
+            }
+            if (mine) return;
+            ulong target = ReadRef(p);
+            if (p.Err || target == 0) return;
+            if (kind == Msg.BuildMove)
+            {
+                ObjState o = ReadObj(p);
+                if (p.Err) return;
+                o.Id = target;
+                mGame.MoveObject(target, o);
+                if (lot == mBuildLot) { mSent[target] = o; mSeen[target] = o; }
+            }
+            else if (kind == Msg.BuildDelete)
+            {
+                mGame.DestroyObject(target);
+                mSent.Remove(target); mSeen.Remove(target);
+                ulong net;
+                if (mLocalToNet.TryGetValue(target, out net)) { mLocalToNet.Remove(target); mNetToLocal.Remove(net); }
             }
         }
 
@@ -317,6 +558,7 @@ namespace Sims3MP
                             mGame.Notify("The admin uploaded a new copy of the world. Return to the main menu and load the save again to continue.");
                         }
                         InSession = false; mReadySent = false;
+                        ForgetWorld(); // a new world starts a new operation log
                     }
                     break;
                 case Msg.SClock:
@@ -350,16 +592,30 @@ namespace Sims3MP
                 }
                 case Msg.SOp:
                 {
-                    r.U64();
-                    uint from = r.U32(); byte cat = r.U8();
-                    r.U64(); r.U64();
+                    ulong seq = r.U64();
+                    uint from = r.U32(); byte cat = (byte)(r.U8() & 0x7F);
+                    ulong lot = r.U64(); r.U64();
                     Rd p = r.Bytes();
-                    if (from == PlayerId || cat != Msg.OpGeneral || !mReadySent) break;
-                    if (p.U8() == Msg.OpInteraction)
+                    if (r.Err || !mReadySent) break;
+                    if (seq > mLastSeq) mLastSeq = seq;
+                    // During the replay that precedes the snapshot nothing is "ours":
+                    // player ids are per connection and this copy of the world is fresh.
+                    bool mine = InSession && from == PlayerId;
+                    if (cat == Msg.OpBuild) ApplyBuild(seq, mine, lot, p);
+                    else if (cat == Msg.OpGeneral && !mine && p.U8() == Msg.OpInteraction)
                     {
                         ulong sim = p.U64(); string def = p.Str(); ulong target = p.U64();
                         if (!p.Err) mGame.PushInteraction(sim, def, target);
                     }
+                    break;
+                }
+                case Msg.SEntityData:
+                {
+                    ulong ent = r.U64(); byte slot = r.U8();
+                    Rd p = r.Bytes();
+                    // Also applies our own household's last published values after a
+                    // reload (it is not claimed yet at that point), restoring them.
+                    if (!r.Err && mReadySent && slot == Msg.SlotVitals && ent != mClaimed) ApplyVitals(ent, p);
                     break;
                 }
                 case Msg.LStateRelay:

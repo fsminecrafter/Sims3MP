@@ -15,6 +15,21 @@ namespace Sims3MP
         public ulong Target;         // object id of that interaction's target
     }
 
+    /// <summary>An object placed on a lot (furniture, doors, plants...).</summary>
+    public struct ObjState
+    {
+        public ulong Id;             // this client's object id
+        public uint KeyType, KeyGroup;
+        public ulong KeyInstance;    // catalog resource the object is made from
+        public float X, Y, Z, FwdX, FwdZ;
+        public int Level;
+
+        public bool Same(ObjState o)
+        {
+            return X == o.X && Y == o.Y && Z == o.Z && FwdX == o.FwdX && FwdZ == o.FwdZ && Level == o.Level;
+        }
+    }
+
     public struct NamedId
     {
         public ulong Id;
@@ -51,6 +66,19 @@ namespace Sims3MP
         void ControlledSims(List<SimState> into);
         void ApplyRemoteSim(ulong simId, float x, float y, float z, float fwdX, float fwdZ);
         void PushInteraction(ulong simId, string definitionType, ulong target);
+
+        // Needs and money. Motives are always these six, in this order:
+        // hunger, energy, bladder, hygiene, social, fun.
+        int GetFunds(ulong household);
+        void SetFunds(ulong household, int funds);
+        bool ReadMotives(ulong simId, float[] six);
+        void ApplyMotives(ulong simId, float[] six);
+
+        // Build/buy. Ids are local to this client.
+        void LotObjects(ulong lot, List<ObjState> into);
+        ulong CreateObject(ulong lot, ObjState state); // 0 = failed
+        void MoveObject(ulong id, ObjState state);
+        void DestroyObject(ulong id);
 
         void Listener(out float x, out float y, out float z, out float fwdX, out float fwdZ);
 

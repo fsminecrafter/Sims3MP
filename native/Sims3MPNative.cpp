@@ -14,6 +14,7 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <vector>
 
@@ -21,7 +22,7 @@
 
 namespace {
 
-const unsigned short kBridgePort = 38921;
+const unsigned short kDefaultBridgePort = 38921;
 const size_t kMaxFrame = 1 << 20;
 const size_t kMaxBacklog = 8 << 20;
 
@@ -35,6 +36,20 @@ DWORD g_lastSpawn = 0;
 HMODULE g_self = NULL;
 std::vector<uint8_t> g_out; // bytes not yet accepted by the socket
 std::vector<uint8_t> g_in;  // bytes received but not yet returned as frames
+
+// The bridge port can be overridden per game instance with the environment
+// variable SIMS3MP_BRIDGE_PORT. Test mode uses this to run two copies of the
+// game on one PC, each with its own bridge.
+unsigned short BridgePort() {
+    static unsigned short port = 0;
+    if (port == 0) {
+        char buf[16];
+        DWORD n = GetEnvironmentVariableA("SIMS3MP_BRIDGE_PORT", buf, sizeof buf);
+        int v = (n > 0 && n < sizeof buf) ? atoi(buf) : 0;
+        port = (v > 1023 && v < 65536) ? (unsigned short)v : kDefaultBridgePort;
+    }
+    return port;
+}
 
 void Drop() {
     if (g_sock != INVALID_SOCKET) closesocket(g_sock);
@@ -58,11 +73,9 @@ void SpawnBridge() {
     if (!slash) return;
     *slash = 0;
 
-    wchar_t cmd[MAX_PATH + 64];
+    wchar_t cmd[MAX_PATH + 96];
     if (lstrlenW(dir) > MAX_PATH - 32) return;
-    lstrcpyW(cmd, L"\"");
-    lstrcatW(cmd, dir);
-    lstrcatW(cmd, L"\\sims3mp-bridge.exe\"");
+    wsprintfW(cmd, L"\"%s\\sims3mp-bridge.exe\" -local 127.0.0.1:%u", dir, (unsigned)BridgePort());
 
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
@@ -94,7 +107,7 @@ void BeginConnect() {
     sockaddr_in a;
     ZeroMemory(&a, sizeof a);
     a.sin_family = AF_INET;
-    a.sin_port = htons(kBridgePort);
+    a.sin_port = htons(BridgePort());
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (connect(g_sock, (sockaddr*)&a, sizeof a) == 0) {
         g_state = Connected;

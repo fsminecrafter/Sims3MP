@@ -88,6 +88,8 @@ func TestRelayLatency(t *testing.T) {
 	b, _, _ := hello(t, s.Addr(), "B", "secret-bbbb", "")
 	a.Write(proto.Frame(proto.CReady, nil))
 	b.Write(proto.Frame(proto.CReady, nil))
+	until(t, a, proto.SSnapshotEnd)
+	until(t, b, proto.SSnapshotEnd)
 	b.SetReadDeadline(time.Now().Add(20 * time.Second))
 	go func() { // drain A
 		for {
@@ -119,5 +121,114 @@ func TestRelayLatency(t *testing.T) {
 	t.Logf("op relay over loopback: mean %v, worst %v", total/n, worst)
 	if total/n > 5*time.Millisecond {
 		t.Fatalf("relay too slow: mean %v", total/n)
+	}
+}
+
+// until reads frames until one of the wanted type arrives.
+func until(t *testing.T, c net.Conn, typ uint8) proto.R {
+	t.Helper()
+	c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
+		got, p, err := proto.ReadFrame(c)
+		if err != nil {
+			t.Fatalf("waiting for message %d: %v", typ, err)
+		}
+		if got == typ {
+			return proto.R{B: p}
+		}
+	}
+}
+
+func running(t *testing.T, dir string) *Server {
+	s, err := New(Config{Addr: "127.0.0.1:0", DataDir: dir, AdminPassword: "pw", Logf: func(string, ...any) {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go s.Serve()
+	s.mu.Lock()
+	s.state, s.st.HasWorld, s.dirty = proto.StateRunning, true, true
+	s.mu.Unlock()
+	return s
+}
+
+func op(cat uint8, lot uint64, tag string) []byte {
+	return proto.Frame(proto.COp, (&proto.W{}).U8(cat).U64(lot).U64(0).Bytes([]byte(tag)).B)
+}
+
+func TestOpLogAndEntityData(t *testing.T) {
+	dir := t.TempDir()
+	s := running(t, dir)
+	a, _, _ := hello(t, s.Addr(), "Ann", "secret-ann", "")
+	b, _, _ := hello(t, s.Addr(), "Ben", "secret-ben", "")
+	for _, c := range []net.Conn{a, b} {
+		c.Write(proto.Frame(proto.CReady, nil))
+		until(t, c, proto.SSnapshotEnd)
+	}
+
+	// Needs and money: only the owner of a household may publish its data.
+	const house = 42
+	vitals := func(v string) []byte {
+		return proto.Frame(proto.CEntityData, (&proto.W{}).U64(house).U8(1).Bytes([]byte(v)).B)
+	}
+	b.Write(vitals("forged")) // Ben does not own it: ignored
+	a.Write(proto.Frame(proto.CClaimEntity, (&proto.W{}).U64(house).B))
+	a.Write(vitals("funds=1500"))
+	r := until(t, b, proto.SEntityData)
+	if r.U64() != house || r.U8() != 1 || string(r.Bytes()) != "funds=1500" {
+		t.Fatal("wrong entity data relayed")
+	}
+
+	// A transient op is relayed but not recorded; world ops are recorded.
+	a.Write(op(proto.OpWorld, 0, "one"))
+	a.Write(op(proto.OpWorld|proto.OpTransient, 0, "fleeting"))
+	a.Write(op(proto.OpWorld, 0, "two"))
+	var seqs []uint64
+	for len(seqs) < 3 {
+		r := until(t, b, proto.SOp)
+		seqs = append(seqs, r.U64())
+	}
+
+	// Restart the server: log and entity data must survive.
+	s.Close()
+	s = running(t, dir)
+	defer s.Close()
+	c, _, _ := hello(t, s.Addr(), "Cat", "secret-cat", "")
+	c.Write(proto.Frame(proto.CReady, nil))
+	r = until(t, c, proto.SEntityData)
+	if r.U64(); r.U8() != 1 || string(r.Bytes()) != "funds=1500" {
+		t.Fatal("entity data lost over restart")
+	}
+	var tags []string
+	c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
+		typ, p, err := proto.ReadFrame(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if typ == proto.SSnapshotEnd {
+			break
+		}
+		if typ == proto.SOp {
+			r := proto.R{B: p[29:]}
+			tags = append(tags, string(r.Bytes()))
+		}
+	}
+	if len(tags) != 2 || tags[0] != "one" || tags[1] != "two" {
+		t.Fatalf("replayed ops = %v, want [one two]", tags)
+	}
+
+	// Resuming after the first op replays only what came later, and new ops
+	// continue the old numbering.
+	d, _, _ := hello(t, s.Addr(), "Dan", "secret-dan", "")
+	d.Write(proto.Frame(proto.CReady, (&proto.W{}).U64(seqs[0]).B))
+	r = until(t, d, proto.SOp)
+	if got := r.U64(); got != seqs[2] {
+		t.Fatalf("resume replayed seq %d, want %d", got, seqs[2])
+	}
+	until(t, d, proto.SSnapshotEnd)
+	d.Write(op(proto.OpWorld, 0, "three"))
+	r = until(t, d, proto.SOp)
+	if got := r.U64(); got <= seqs[2] {
+		t.Fatalf("sequence went backwards after restart: %d", got)
 	}
 }

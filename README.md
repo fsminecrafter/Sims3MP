@@ -1,116 +1,128 @@
-# Sims3MP
+# Sims3MP — multiplayer for The Sims 3
 
-Multiplayer for The Sims 3: a dedicated server that does not need the game,
-and a client mod that keeps every player's game in step with it.
+Play the same Sims 3 town with your friends. Everyone controls their own
+household, on their own PC, in the same world.
 
-> **Status: early foundation, not yet playable.** The server, the client
-> bridge, voice chat and the mod's session logic are implemented and tested
-> automatically. The part that talks to the game itself (`mod/src/GameApi.cs`)
-> was written without access to the game and has **never been run inside The
-> Sims 3**. See [What works and what does not](#what-works-and-what-does-not).
+> **Heads up — this is not playable yet.** The server and most of the mod are
+> written and tested, but the piece that plugs into the game has never been
+> run inside The Sims 3. See [Where the project stands](#where-the-project-stands).
 
-## How it fits together
+## What you need
 
+- The Sims 3 on Windows (the server itself runs anywhere and does not need the game)
+- Your game already set up for mods
+- [MonoPatcher](https://modthesims.info/d/687815) installed
+
+## Install
+
+1. Download this project and unpack it.
+2. Close The Sims 3.
+3. Right-click `setup.ps1` and choose **Run with PowerShell**.
+
+That's it. The script finds your game, copies the files, and tells you if
+anything is missing. If Windows blocks the script, open PowerShell in the
+folder and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
 ```
- The Sims 3 (each player)                              anywhere, no game needed
-┌──────────────────────────┐   loopback   ┌──────────────────┐  TCP + UDP  ┌─────────────────┐
-│ Sims3MP script mod (C#)  │◄────────────►│ sims3mp-bridge   │◄───────────►│ sims3mp-server  │
-│  via Sims3MPNative.dll   │              │ files, voice, net│             │                 │
-└──────────────────────────┘              └──────────────────┘             └─────────────────┘
+
+| Command | What it does |
+|---|---|
+| `.\setup.ps1` | Install |
+| `.\setup.ps1 -Test` | Start **two copies of the game** on this PC so you can try multiplayer alone |
+| `.\setup.ps1 -Server` | Run a dedicated server on this PC |
+| `.\setup.ps1 -Uninstall` | Remove Sims3MP (saves and other mods are untouched) |
+| `.\setup.ps1 -GameDir "D:\Games\The Sims 3"` | Use if the game is not found automatically |
+
+## How to play
+
+**The host (admin)**
+
+1. Make your world, your sim, and pick a home as usual. **Save the game.**
+2. Press **F9**. Choose **Host on this PC**.
+3. Press **F9** again. Choose **Copy world and start hosting**.
+4. Give your friends your IP address. Forward port `38920` (TCP and UDP) on your router.
+
+**Everyone else**
+
+1. Start the game and load any save. Press **F9** and choose **Join a server**.
+2. If the server uses mods you don't have, they are installed for you and you are asked to restart the game.
+3. The world downloads as a save. Load it from the main menu, press **F9**, choose **Enter the session**.
+4. Press **F9 > Choose household** to pick who you play.
+
+If F9 does nothing, open the cheat console (Ctrl+Shift+C) and type `sims3mp`.
+
+## The rules
+
+| | |
+|---|---|
+| **Time** | Normal speed. It jumps to 3x only while *everyone* is asleep. The admin can change it any time. |
+| **Households** | Everyone plays their own. Two players can't control the same one. |
+| **Money and needs** | Follow the player who owns the household, and are restored if you reload. |
+| **Lots** | Move in and the lot is yours. Only you, builders you appoint (F9 > Lots and builders), and the admin can build there. |
+| **Build/buy** | Furniture and objects you place, move or delete show up for everyone. |
+| **Mods like NRaas** | Allowed. Only the admin gets their menus. |
+| **Voice chat** | Built in. People get quieter as your camera moves away from them. |
+
+## Trying it on one PC
+
+```powershell
+.\setup.ps1 -Test
 ```
 
-The game's script runtime has no sockets, threads or file access, so the mod
-cannot network by itself. A 200-line native shim (loaded through
-[MonoPatcher](https://modthesims.info/d/687815)) connects the mod to a bridge
-process on the same PC, and the bridge does the real work. Heavy operations
-(uploading a save, installing mods, mixing voice) therefore never run on the
-game's thread or inside its 32-bit address space.
+This opens the game twice in windowed mode — one host, one guest — and prints
+the exact steps for each window. Both copies share your saves and mods. If
+the game refuses to open twice on your PC, use a second PC instead.
 
-| Part | Folder | Language |
-|---|---|---|
-| Dedicated server | `cmd/sims3mp-server`, `internal/server` | Go |
-| Client bridge | `cmd/sims3mp-bridge`, `internal/bridge`, `internal/voice` | Go |
-| Native shim | `native/` | C++ (32-bit DLL) |
-| Script mod | `mod/` | C# |
+## Running a server without the game
 
-## Hosting flow
-
-1. The admin creates a world, a sim and picks a lot as usual, then **saves**.
-2. **F9** opens the Sims3MP menu (or type `sims3mp` in the cheat console).
-3. *Host on this PC* starts a server locally, or *Connect to a server as
-   admin* uses a dedicated one started with `sims3mp-server -admin-password ...`.
-4. *Copy world and start hosting* uploads the admin's mods and save. The
-   server holds every game paused while it takes the world in, then resumes.
-5. Other players press F9 > *Join a server*. Missing mods are installed
-   automatically (the player is asked to restart the game), the world is
-   downloaded as a save, and after loading it they enter the session.
-
-## Rules the server enforces
-
-- **Time** runs at 1x, and at 3x while every player's sims are asleep. The
-  admin can pin any speed (or pause) with the normal speed buttons or F9.
-- **Households**: each player plays their own; a household can only be
-  claimed by one player.
-- **Lots**: moving in makes you the owner. Only the owner, the builders they
-  appoint (F9 > *Lots and builders*) and the admin can build there. Everyone
-  can see every lot.
-- **Admin-only mods**: NRaas interactions are hidden for non-admins, and
-  admin operations are rejected by the server for everyone else.
-- **Voice**: proximity chat. Volume falls with distance and pans left/right;
-  beyond 40 units the server does not even send the audio.
-
-## Running a dedicated server
+On Windows: `.\setup.ps1 -Server`. On Linux or macOS, build once and run it:
 
 ```bash
 ./scripts/build.sh
 ```
 
 ```bash
-./dist/server/sims3mp-server-linux-amd64 -addr :38920 -data ./sims3mp-data -admin-password "choose-one"
+./dist/server/sims3mp-server-linux-amd64 -admin-password "pick-one"
 ```
 
-Open port 38920 for both TCP and UDP. `-password` adds a join password.
+Then the admin uses **F9 > Connect to a server as admin** with that password.
 
-## What works and what does not
+## Where the project stands
 
-Verified by automated tests in this repository (`go test ./...` and
-`scripts/test-mod.sh`, which runs the mod's real session and menu code with
-a simulated game against a real server and bridges):
+Tested automatically (`go test ./...` and `scripts/test-mod.sh`, which runs
+the mod's real logic against a real server with a simulated game):
 
-- hosting, world upload and download, automatic mod install + restart prompt
-- player identity, admin rights, kick, persistence across server restarts
-- clock rules (1x / 3x-when-all-asleep / admin override / pause on init)
-- lot ownership, builders, build-mode lockout
-- household ownership, sim position relay over UDP, interaction relay
-- voice codec, voice-activity gate, distance attenuation, stereo pan, range culling
-- server relay time on loopback is about 0.1 ms, so latency is your network's
+- hosting, joining, world download, automatic mod install
+- time rules, admin rights, lot ownership and builders
+- households, sim movement and actions being passed between players
+- money and needs sync, including after a reload
+- placing, moving and deleting objects, including two people building at once
+- voice volume by distance
 
-Not verified, or not done yet:
+Not working or not proven yet:
 
-- **`mod/src/GameApi.cs` has never run in the game.** It is compiled only
-  against `mod/stubs/Sims3Stubs.cs`, a hand-written guess at the game API.
-  Expect wrong names and signatures on the first real build.
-- The native shim and the Windows audio code compile but are untested.
-- **Build/buy changes are not replicated.** Objects, walls and purchases
-  made after the world was hosted stay local until the admin hosts again
-  (which makes everyone reload).
-- Sim sync is "run the same interaction on every client + correct the
-  position when it drifts". The Sims 3 simulation is not deterministic, so
-  needs, funds, relationships and outcomes will drift between players.
-  Making that authoritative is the main remaining work.
-- 60 fps / under 20 ms is a design goal (nothing blocks the game thread,
-  realtime data uses UDP), not a measured result.
-- The game is not paused by the mod while a modal dialog is open on the
-  admin's PC; if the game pauses itself there, everyone pauses.
-- The menu is a numbered text prompt, not a proper window.
-- Windows only (MonoPatcher's native plugins do not exist on macOS).
+- **The in-game part has never run in The Sims 3.** `mod/src/GameApi.cs` was
+  written from memory of the game's API without the game's files. It will
+  need fixes on the first real build, and `Sims3MP.package` must be built by
+  someone who owns the game ([docs/BUILDING.md](docs/BUILDING.md)).
+- `setup.ps1`, test mode, the native DLL and the Windows audio code compile
+  or are written carefully, but have not been run on Windows.
+- Whether The Sims 3 allows two copies to run at once is unconfirmed.
+- **Walls, floors, roofs, terrain and wallpaper are not synced** — only
+  objects. Object colours/patterns are not synced either.
+- Relationships, skills, careers and moodlets are not synced. Sims do the
+  same actions on every PC, but the results can differ between players.
+- If the host reloads their own save, they should use *Copy world and start
+  hosting* again so everyone gets the same world.
+- 60 fps and under 20 ms is what the design aims for; it has not been measured in the game.
+- The F9 menu is a simple numbered list.
 
-## Security notes
+## Good to know
 
-- Joining a server installs the `.package` mods its admin uploaded. Script
-  mods are code: only join servers you trust.
-- Player names are bound to a key stored in
-  `Documents\Electronic Arts\The Sims 3\Sims3MP\identity.key`.
-- Traffic is not encrypted.
+- Joining a server installs the mods its admin uses. Mods are code — only join servers you trust.
+- Voice and game traffic are not encrypted.
+- Logs are in `Documents\Electronic Arts\The Sims 3\Sims3MP\`.
 
-See [docs/BUILDING.md](docs/BUILDING.md) to build and install the client.
+Developers: see [docs/BUILDING.md](docs/BUILDING.md).

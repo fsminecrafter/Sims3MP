@@ -30,7 +30,7 @@ const (
 	CFileEnd     = 6  // (also server -> client)
 	CUploadEnd   = 7  // u8 kind (admin)
 	CRequestFile = 9  // u8 kind, str path
-	CReady       = 10 // client has the world loaded and wants the session snapshot
+	CReady       = 10 // [u64 lastSeq]: world is loaded; send the snapshot and every logged op after lastSeq
 	COp          = 11 // u8 category, u64 lot, u64 entity, bytes payload
 	CSetSleeping = 12 // u8 allAsleep
 	CSetSpeed    = 13 // u8 mode (admin)
@@ -44,6 +44,7 @@ const (
 	CKick        = 21 // str playerName (admin)
 	CSetLotOwner = 22 // u64 lot, str playerName ("" clears) (admin)
 	CReleaseEnt  = 23 // u64 entity
+	CEntityData  = 24 // u64 entity, u8 slot, bytes: latest-wins state of an entity the sender owns
 )
 
 // Server -> client (TCP).
@@ -64,6 +65,7 @@ const (
 	SPong        = 77 // u64 clientTime
 	SNotice      = 78 // str text
 	SSnapshotEnd = 79 // sent after the snapshot that follows CReady
+	SEntityData  = 80 // u64 entity, u8 slot, bytes
 )
 
 // UDP datagram types.
@@ -121,6 +123,11 @@ const (
 	OpBuild   = 1 // sender must own the lot or be one of its builders
 	OpAdmin   = 2 // admin only (e.g. NRaas master-controller actions)
 	OpWorld   = 3 // anyone
+
+	// OpTransient can be OR-ed into a category: the op is relayed in order
+	// but not recorded, so it is never replayed to players who join later
+	// (e.g. "this sim started that interaction").
+	OpTransient = 0x80
 )
 
 // Speed modes for CSetSpeed / SClock.

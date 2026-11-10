@@ -9,6 +9,11 @@ namespace Sims3.SimIFace
 {
     public class TunableAttribute : Attribute { }
     public struct Vector3 { public float x, y, z; public Vector3(float x, float y, float z) { this.x = x; this.y = y; this.z = z; } }
+    public struct ResourceKey
+    {
+        public ulong InstanceId; public uint TypeId, GroupId;
+        public ResourceKey(ulong instance, uint type, uint group) { InstanceId = instance; TypeId = type; GroupId = group; }
+    }
     public struct ObjectGuid { public ulong Value; public ObjectGuid(ulong v) { Value = v; } }
     public static class World
     {
@@ -95,6 +100,12 @@ namespace Sims3.Gameplay.Abstracts
         public Vector3 Position { get { return new Vector3(); } }
         public Vector3 ForwardVector { get { return new Vector3(); } }
         public bool HasBeenDestroyed { get { return false; } }
+        public bool InWorld { get { return true; } }
+        public IGameObject Parent { get { return null; } }
+        public int Level { get { return 0; } }
+        public ResourceKey GetResourceKey() { return new ResourceKey(); }
+        public void AddToWorld() { }
+        public void Destroy() { }
         public List<InteractionObjectPair> Interactions;
         public void SetPosition(Vector3 p) { }
         public void SetForward(Vector3 f) { }
@@ -105,6 +116,12 @@ namespace Sims3.Gameplay.Abstracts
 namespace Sims3.Gameplay.Autonomy
 {
     public class Autonomy { public void IncrementAutonomyDisabled() { } public void DecrementAutonomyDisabled() { } }
+    public enum CommodityKind { Hunger, Energy, Bladder, Hygiene, Social, Fun }
+    public class Motives
+    {
+        public float GetValue(CommodityKind k) { return 0f; }
+        public void SetValue(CommodityKind k, float v) { }
+    }
 }
 
 namespace Sims3.Gameplay.Actors
@@ -117,6 +134,7 @@ namespace Sims3.Gameplay.Actors
         public InteractionInstance CurrentInteraction { get { return null; } }
         public Sims3.Gameplay.Autonomy.Autonomy Autonomy;
         public bool IsSleeping { get { return false; } }
+        public Sims3.Gameplay.Autonomy.Motives Motives;
     }
 }
 
@@ -138,13 +156,19 @@ namespace Sims3.Gameplay.CAS
         public List<Sim> Sims = new List<Sim>();
         public Sims3.Gameplay.Core.Lot LotHome;
         public bool IsSpecialHousehold { get { return false; } }
+        public int FamilyFunds { get { return 0; } }
+        public void SetFamilyFunds(int funds) { }
     }
 }
 
 namespace Sims3.Gameplay.Core
 {
     using Sims3.SimIFace;
-    public class Lot { public ulong LotId; public string Name; public string Address; public bool IsWorldLot { get { return false; } } }
+    public class Lot { public ulong LotId; public string Name; public string Address; public bool IsWorldLot { get { return false; } } public T[] GetObjects<T>() { return new T[0]; } }
+    public static class GlobalFunctions
+    {
+        public static Sims3.Gameplay.Interactions.IGameObject CreateObjectOutOfWorld(ResourceKey key) { return null; }
+    }
     public static class LotManager
     {
         public static Lot GetLotAtPoint(Vector3 p) { return null; }

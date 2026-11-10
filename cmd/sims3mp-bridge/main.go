@@ -5,9 +5,11 @@ package main
 import (
 	"flag"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/fsminecrafter/sims3mp/internal/bridge"
 	"github.com/fsminecrafter/sims3mp/internal/voice"
@@ -26,11 +28,27 @@ func main() {
 	flag.StringVar(&cfg.ServerExe, "server-exe", serverExe, "dedicated server binary used for hosting on this PC")
 	novoice := flag.Bool("no-voice", false, "disable voice chat")
 	flag.Parse()
+	// setup.ps1 records the real user-data folder next to the bridge: it is
+	// not always the English default (localised games, redirected Documents).
+	explicit := false
+	flag.Visit(func(f *flag.Flag) { explicit = explicit || f.Name == "ts3dir" })
+	if !explicit {
+		if d, err := os.ReadFile(filepath.Join(filepath.Dir(exe), "ts3dir.txt")); err == nil {
+			if dir := strings.TrimSpace(strings.TrimPrefix(string(d), "\ufeff")); dir != "" {
+				cfg.TS3Dir = dir
+			}
+		}
+	}
 	if *novoice {
 		cfg.Audio = nil
 	}
+	// One log per bridge: test mode runs two of them side by side.
+	logName := "bridge.log"
+	if _, port, err := net.SplitHostPort(cfg.LocalAddr); err == nil && port != "38921" {
+		logName = "bridge-" + port + ".log"
+	}
 	if err := os.MkdirAll(filepath.Join(cfg.TS3Dir, "Sims3MP"), 0o755); err == nil {
-		if f, err := os.OpenFile(filepath.Join(cfg.TS3Dir, "Sims3MP", "bridge.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
+		if f, err := os.OpenFile(filepath.Join(cfg.TS3Dir, "Sims3MP", logName), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
 			log.SetOutput(f)
 		}
 	}

@@ -45,11 +45,11 @@ namespace Sims3MP
     {
         public const byte CReady = 10, COp = 11, CSetSleeping = 12, CSetSpeed = 13, CClaimLot = 14,
             CReleaseLot = 15, CSetBuilder = 16, CClaimEntity = 17, CSetShared = 18, CChat = 19,
-            CKick = 21, CSetLotOwner = 22, CReleaseEntity = 23;
+            CKick = 21, CSetLotOwner = 22, CReleaseEntity = 23, CEntityData = 24;
 
         public const byte SWelcome = 64, SPlayerJoin = 66, SPlayerLeave = 67, SState = 69, SClock = 70,
             SOp = 71, SOpRejected = 72, SLot = 73, SEntity = 74, SShared = 75, SChat = 76,
-            SNotice = 78, SSnapshotEnd = 79;
+            SNotice = 78, SSnapshotEnd = 79, SEntityData = 80;
 
         public const byte LConnect = 128, LDisconnect = 129, LHostWorld = 130, LState = 131,
             LListener = 132, LVoice = 133, LStartServer = 134, LQuery = 135,
@@ -62,8 +62,17 @@ namespace Sims3MP
         public const byte OpGeneral = 0, OpBuild = 1, OpAdmin = 2, OpWorld = 3;
         public const byte SpeedAuto = 255;
 
+        // OR-ed into a category: relayed in order but never replayed to late joiners.
+        public const byte OpTransient = 0x80;
+
         // First payload byte of an OpGeneral operation.
         public const byte OpInteraction = 1;
+
+        // First payload byte of an OpBuild operation.
+        public const byte BuildCreate = 1, BuildMove = 2, BuildDelete = 3;
+
+        // Entity data slots.
+        public const byte SlotVitals = 1; // household funds + needs of its sims
     }
 
     /// <summary>Growable little-endian message writer. Byte 0 is the message type.</summary>

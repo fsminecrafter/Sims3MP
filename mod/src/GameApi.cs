@@ -10,6 +10,7 @@ using System.Reflection;
 using Sims3.Gameplay;
 using Sims3.Gameplay.Abstracts;
 using Sims3.Gameplay.Actors;
+using Sims3.Gameplay.Autonomy;
 using Sims3.Gameplay.CAS;
 using Sims3.Gameplay.Core;
 using Sims3.Gameplay.Interactions;
@@ -325,6 +326,93 @@ namespace Sims3MP
             if (inst == null) return;
             sim.InteractionQueue.CancelAllInteractions();
             sim.InteractionQueue.Add(inst);
+        }
+
+        // --- needs and money ---------------------------------------------
+
+        static readonly CommodityKind[] kMotives = new CommodityKind[] {
+            CommodityKind.Hunger, CommodityKind.Energy, CommodityKind.Bladder,
+            CommodityKind.Hygiene, CommodityKind.Social, CommodityKind.Fun };
+
+        static Household FindHousehold(ulong id)
+        {
+            foreach (Household h in Household.sHouseholdList)
+                if (h != null && h.HouseholdId == id) return h;
+            return null;
+        }
+
+        public int GetFunds(ulong household)
+        {
+            Household h = FindHousehold(household);
+            return h == null ? 0 : h.FamilyFunds;
+        }
+
+        public void SetFunds(ulong household, int funds)
+        {
+            Household h = FindHousehold(household);
+            if (h != null && h.FamilyFunds != funds) h.SetFamilyFunds(funds);
+        }
+
+        public bool ReadMotives(ulong simId, float[] six)
+        {
+            Sim sim = FindSim(simId);
+            if (sim == null || sim.Motives == null) return false;
+            for (int i = 0; i < 6; i++) six[i] = sim.Motives.GetValue(kMotives[i]);
+            return true;
+        }
+
+        public void ApplyMotives(ulong simId, float[] six)
+        {
+            Sim sim = FindSim(simId);
+            if (sim == null || sim.Motives == null) return;
+            for (int i = 0; i < 6; i++) sim.Motives.SetValue(kMotives[i], six[i]);
+        }
+
+        // --- build / buy -------------------------------------------------
+
+        public void LotObjects(ulong lotId, List<ObjState> into)
+        {
+            Lot lot = LotManager.GetLot(lotId);
+            if (lot == null) return;
+            foreach (GameObject obj in lot.GetObjects<GameObject>())
+            {
+                // Sims, and things carried or stored inside other things, are not furniture.
+                if (obj == null || obj.HasBeenDestroyed || obj is Sim || obj.Parent != null || !obj.InWorld) continue;
+                ResourceKey key = obj.GetResourceKey();
+                if (key.InstanceId == 0) continue;
+                ObjState s = new ObjState();
+                s.Id = obj.ObjectId.Value;
+                s.KeyType = key.TypeId; s.KeyGroup = key.GroupId; s.KeyInstance = key.InstanceId;
+                Vector3 p = obj.Position, f = obj.ForwardVector;
+                s.X = p.x; s.Y = p.y; s.Z = p.z; s.FwdX = f.x; s.FwdZ = f.z;
+                s.Level = obj.Level;
+                into.Add(s);
+            }
+        }
+
+        public ulong CreateObject(ulong lot, ObjState s)
+        {
+            ResourceKey key = new ResourceKey(s.KeyInstance, s.KeyType, s.KeyGroup);
+            GameObject obj = GlobalFunctions.CreateObjectOutOfWorld(key) as GameObject;
+            if (obj == null) return 0;
+            obj.SetPosition(new Vector3(s.X, s.Y, s.Z));
+            obj.SetForward(new Vector3(s.FwdX, 0f, s.FwdZ));
+            obj.AddToWorld();
+            return obj.ObjectId.Value;
+        }
+
+        public void MoveObject(ulong id, ObjState s)
+        {
+            GameObject obj = GameObject.GetObject<GameObject>(new ObjectGuid(id));
+            if (obj == null || obj is Sim) return;
+            obj.SetPosition(new Vector3(s.X, s.Y, s.Z));
+            obj.SetForward(new Vector3(s.FwdX, 0f, s.FwdZ));
+        }
+
+        public void DestroyObject(ulong id)
+        {
+            GameObject obj = GameObject.GetObject<GameObject>(new ObjectGuid(id));
+            if (obj != null && !(obj is Sim)) obj.Destroy();
         }
 
         public void Listener(out float x, out float y, out float z, out float fwdX, out float fwdZ)

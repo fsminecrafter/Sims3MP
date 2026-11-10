@@ -1,0 +1,26 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends g++-mingw-w64-i686 zip
+      - run: go test ./...
+      - run: ./scripts/build.sh
+      - name: Package
+        run: |
+          cp setup.ps1 README.md dist/client/
+          (cd dist/client && zip -r ../sims3mp-client.zip .)
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dist/sims3mp-client.zip dist/server/* --title "$TAG" --generate-notes

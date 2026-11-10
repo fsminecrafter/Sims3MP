@@ -64,6 +64,32 @@ sealed class FakeGame : IGame
     public void ControlledSims(List<SimState> into) { into.AddRange(Sims); }
     public void ApplyRemoteSim(ulong id, float x, float y, float z, float fx, float fz) { RemoteX[id] = x; }
     public void PushInteraction(ulong sim, string def, ulong target) { Pushed.Add(sim + ":" + def + ":" + target); }
+    public Dictionary<ulong, int> Funds = new Dictionary<ulong, int>();
+    public Dictionary<ulong, float[]> Motives = new Dictionary<ulong, float[]>();
+    public List<ObjState> Objects = new List<ObjState>(); // everything is on lot 77
+    public ulong NextId = 1000; // the same on every client, as in the real game after loading one save
+
+    public int GetFunds(ulong h) { int v; return Funds.TryGetValue(h, out v) ? v : 0; }
+    public void SetFunds(ulong h, int funds) { Funds[h] = funds; }
+    public bool ReadMotives(ulong sim, float[] six)
+    {
+        float[] m;
+        if (!Motives.TryGetValue(sim, out m)) return false;
+        Array.Copy(m, six, 6);
+        return true;
+    }
+    public void ApplyMotives(ulong sim, float[] six) { Motives[sim] = (float[])six.Clone(); }
+    public void LotObjects(ulong lot, List<ObjState> into) { if (lot == 77) into.AddRange(Objects); }
+    public ulong CreateObject(ulong lot, ObjState o) { o.Id = NextId++; Objects.Add(o); return o.Id; }
+    public ulong Place(ulong key, float x) { ObjState o = new ObjState(); o.KeyInstance = key; o.X = x; return CreateObject(77, o); }
+    public int Find(ulong key) { return Objects.FindIndex(delegate(ObjState o) { return o.KeyInstance == key; }); }
+    public void MoveObject(ulong id, ObjState st)
+    {
+        int i = Objects.FindIndex(delegate(ObjState o) { return o.Id == id; });
+        if (i >= 0) { st.KeyInstance = Objects[i].KeyInstance; st.Id = id; Objects[i] = st; }
+    }
+    public void DestroyObject(ulong id) { Objects.RemoveAll(delegate(ObjState o) { return o.Id == id; }); }
+
     public void Listener(out float x, out float y, out float z, out float fx, out float fz) { x = y = z = fx = 0; fz = 1; }
     public void RestrictAdminMods(bool restrict) { Restricted = restrict; }
 }
@@ -146,6 +172,50 @@ static class Harness
         Console.WriteLine("ok: non-admin speed change is reverted");
         GA.SpeedNow = 2;
         Wait("admin speed change applies to everyone", delegate { return GB.SpeedNow == 2; });
+
+        // Needs and money follow the household's owner.
+        GA.Funds[1001] = 1234; GA.Motives[5001] = new float[] { 0.5f, 10f, 20f, 30f, 40f, -50f };
+        GB.Funds[1002] = 777;
+        Wait("Alice's funds and needs reach Bob", delegate
+        {
+            float[] m;
+            return GB.GetFunds(1001) == 1234 && GB.Motives.TryGetValue(5001, out m) && m[0] == 0.5f && m[5] == -50f;
+        });
+        Wait("Bob's funds reach Alice", delegate { return GA.GetFunds(1002) == 777; });
+        GA.Funds[1001] = 900; // Alice buys something
+        Wait("spending shows up for Bob", delegate { return GB.GetFunds(1001) == 900; });
+        if (GA.GetFunds(1001) != 900 || GB.GetFunds(1002) != 777) { Console.WriteLine("FAIL: an owner's funds were overwritten"); return 1; }
+
+        // Build/buy: both build on lot 77 at once. Their games hand out the
+        // same local object ids, which must not confuse anything.
+        GA.CameraLot = 77; GA.BuildMode = true; GB.BuildMode = true;
+        Pump(100);
+        ulong sofaB = GB.Place(0xB0B, 1f), lampA = GA.Place(0xA11CE, 2f);
+        if (sofaB != lampA) { Console.WriteLine("FAIL: test expects colliding local ids"); return 1; }
+        Wait("objects placed by each appear for the other", delegate { return GA.Find(0xB0B) >= 0 && GB.Find(0xA11CE) >= 0; });
+        if (GA.Objects.Count != 2 || GB.Objects.Count != 2) { Console.WriteLine("FAIL: duplicated objects"); return 1; }
+        ObjState moved = GB.Objects[GB.Find(0xB0B)]; moved.X = 7.5f; GB.Objects[GB.Find(0xB0B)] = moved;
+        Wait("moving an object is replicated", delegate { return GA.Objects[GA.Find(0xB0B)].X == 7.5f; });
+        if (GA.Objects[GA.Find(0xA11CE)].X != 2f) { Console.WriteLine("FAIL: the wrong object was moved"); return 1; }
+        GA.DestroyObject(lampA);
+        Wait("deleting an object is replicated", delegate { return GB.Find(0xA11CE) < 0; });
+        if (GB.Find(0xB0B) < 0 || GA.Find(0xB0B) < 0) { Console.WriteLine("FAIL: the wrong object was deleted"); return 1; }
+        GA.BuildMode = false; GB.BuildMode = false;
+        Pump(300);
+
+        // Bob reloads the (old) save: what was built since is rebuilt from the
+        // server's log, his own funds come back, old interactions do not replay.
+        int pushed = GB.Pushed.Count;
+        GB.World = false; Pump(200);
+        GB.Objects.Clear(); GB.NextId = 1000; GB.Funds.Clear(); GB.Motives.Clear();
+        GB.World = true;
+        Wait("Bob is back after reloading", delegate { return B.InSession; });
+        if (GB.Objects.Count != 1 || GB.Find(0xB0B) < 0 || GB.Objects[0].X != 7.5f) { Console.WriteLine("FAIL: build log not replayed correctly (" + GB.Objects.Count + " objects)"); return 1; }
+        if (GB.GetFunds(1002) != 777 || GB.GetFunds(1001) != 900) { Console.WriteLine("FAIL: funds not restored after reload"); return 1; }
+        if (GB.Pushed.Count != pushed) { Console.WriteLine("FAIL: old interactions were replayed"); return 1; }
+        Console.WriteLine("ok: reload rebuilds objects, restores funds, replays no interactions");
+        Pump(1200);
+        if (GA.Objects.Count != 1 || GB.Objects.Count != 1) { Console.WriteLine("FAIL: objects duplicated after rejoin"); return 1; }
 
         A.HostWorld("Town");
         Wait("re-hosting pauses Bob and asks him to reload", delegate { return !B.InSession && GB.SpeedNow == 0; });

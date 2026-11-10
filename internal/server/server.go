@@ -6,6 +6,7 @@
 package server
 
 import (
+	"bufio"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -14,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -44,13 +46,14 @@ type lot struct {
 }
 
 type persisted struct {
-	Identities map[string]string `json:"identities"` // name -> sha256(secret)
-	Lots       map[uint64]*lot   `json:"lots"`
-	Entities   map[uint64]string `json:"entities"` // household/sim -> owner name
-	Shared     map[string][]byte `json:"shared"`
-	SimMillis  uint64            `json:"simMillis"`
-	Epoch      uint32            `json:"epoch"`
-	HasWorld   bool              `json:"hasWorld"`
+	Identities map[string]string           `json:"identities"` // name -> sha256(secret)
+	Lots       map[uint64]*lot             `json:"lots"`
+	Entities   map[uint64]string           `json:"entities"` // household/sim -> owner name
+	Shared     map[string][]byte           `json:"shared"`
+	EntityData map[uint64]map[uint8][]byte `json:"entityData"`
+	SimMillis  uint64                      `json:"simMillis"`
+	Epoch      uint32                      `json:"epoch"`
+	HasWorld   bool                        `json:"hasWorld"`
 }
 
 type client struct {
@@ -86,7 +89,9 @@ type Server struct {
 	byKey   map[uint64]*client
 	nextID  uint32
 	seq     uint64
-	oplog   [][]byte
+	oplog   [][]byte // logged SOp frames of the current epoch, in seq order
+	opFile  *os.File
+	opBuf   *bufio.Writer
 	files   [2][]proto.FileEntry
 	mode    uint8 // proto.SpeedAuto, or a fixed speed 0..3
 	speed   uint8
@@ -127,11 +132,17 @@ func New(cfg Config) (*Server, error) {
 			return nil, fmt.Errorf("state.json: %w", err)
 		}
 	}
+	if s.st.EntityData == nil {
+		s.st.EntityData = map[uint64]map[uint8][]byte{}
+	}
 	if s.st.HasWorld {
 		if err := s.rescan(); err != nil {
 			return nil, err
 		}
 		s.state = proto.StateRunning
+	}
+	if err := s.openOpLog(!s.st.HasWorld); err != nil {
+		return nil, err
 	}
 	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
@@ -146,6 +157,45 @@ func New(cfg Config) (*Server, error) {
 	s.ln, s.udp = ln, udp
 	return s, nil
 }
+
+// openOpLog loads the operations recorded since the current world was
+// uploaded, so they survive a server restart, and opens the file for append.
+func (s *Server) openOpLog(truncate bool) error {
+	if s.opFile != nil {
+		s.opFile.Close()
+	}
+	path := filepath.Join(s.cfg.DataDir, "ops.log")
+	flags := os.O_CREATE | os.O_RDWR
+	if truncate {
+		flags |= os.O_TRUNC
+	}
+	f, err := os.OpenFile(path, flags, 0o600)
+	if err != nil {
+		return err
+	}
+	s.oplog, s.seq = nil, 0
+	rd := bufio.NewReader(f)
+	var good int64
+	for {
+		typ, p, err := proto.ReadFrame(rd)
+		if err != nil || typ != proto.SOp || len(p) < 8 {
+			break // end of file, or a torn write from a crash: drop the tail
+		}
+		s.oplog = append(s.oplog, proto.Frame(typ, p))
+		s.seq = binary.LittleEndian.Uint64(p)
+		good += int64(5 + len(p))
+	}
+	if err := f.Truncate(good); err != nil {
+		return err
+	}
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		return err
+	}
+	s.opFile, s.opBuf = f, bufio.NewWriter(f)
+	return nil
+}
+
+func opSeq(frame []byte) uint64 { return binary.LittleEndian.Uint64(frame[5:]) }
 
 func (s *Server) Addr() string          { return s.ln.Addr().String() }
 func (s *Server) AdminPassword() string { return s.cfg.AdminPassword }
@@ -203,6 +253,8 @@ func (s *Server) Close() {
 	}
 	s.advance(time.Now())
 	s.save()
+	s.opBuf.Flush()
+	s.opFile.Close()
 	s.mu.Unlock()
 	s.wg.Wait()
 }
@@ -494,7 +546,10 @@ func (s *Server) dispatch(c *client, typ uint8, p []byte) error {
 			// save is already baked into the new one.
 			s.st.Epoch++
 			s.st.HasWorld = true
-			s.oplog = nil
+			s.st.EntityData = map[uint64]map[uint8][]byte{}
+			if err := s.openOpLog(true); err != nil {
+				return err
+			}
 			for _, o := range s.clients {
 				o.ready = false
 			}
@@ -511,10 +566,15 @@ func (s *Server) dispatch(c *client, typ uint8, p []byte) error {
 		if s.state != proto.StateRunning {
 			return nil
 		}
-		c.ready = true
+		var after uint64
+		if len(p) >= 8 {
+			after = r.U64()
+		}
+		c.ready = false // not in the live broadcast set until caught up
 		c.sleeping = false
 		s.snapshot(c)
-		s.recalcSpeed()
+		s.wg.Add(1)
+		go s.catchUp(c, after, s.st.Epoch)
 	case proto.COp:
 		cat, lotID, ent := r.U8(), r.U64(), r.U64()
 		payload := r.Bytes()
@@ -530,8 +590,9 @@ func (s *Server) dispatch(c *client, typ uint8, p []byte) error {
 		}
 		s.seq++
 		f := proto.Frame(proto.SOp, (&proto.W{}).U64(s.seq).U32(c.id).U8(cat).U64(lotID).U64(ent).Bytes(payload).B)
-		if len(s.oplog) < s.cfg.MaxOpLog {
+		if cat&proto.OpTransient == 0 && len(s.oplog) < s.cfg.MaxOpLog {
 			s.oplog = append(s.oplog, f)
+			s.opBuf.Write(f)
 			if len(s.oplog) == s.cfg.MaxOpLog {
 				s.notifyAdmins("Operation log is full: late joiners will be out of date until an admin re-uploads the world.")
 			}
@@ -616,6 +677,24 @@ func (s *Server) dispatch(c *client, typ uint8, p []byte) error {
 			delete(s.st.Entities, id)
 			s.entityChanged(id)
 		}
+	case proto.CEntityData:
+		id, slot := r.U64(), r.U8()
+		val := r.Bytes()
+		if r.Err || slot >= 16 || len(val) > 4096 {
+			return errBad
+		}
+		if !c.ready || (s.st.Entities[id] != c.name && !c.admin) {
+			return nil // not the owner (any more): silently ignore, this is periodic data
+		}
+		m := s.st.EntityData[id]
+		if m == nil {
+			m = map[uint8][]byte{}
+			s.st.EntityData[id] = m
+		}
+		m[slot] = val
+		s.dirty = true
+		f := proto.Frame(proto.SEntityData, (&proto.W{}).U64(id).U8(slot).Bytes(val).B)
+		s.broadcast(f, func(o *client) bool { return o.ready && o != c })
 	case proto.CSetShared:
 		key := r.Str()
 		val := r.Bytes()
@@ -698,7 +777,7 @@ func (s *Server) canBuild(c *client, lotID uint64) bool {
 }
 
 func (s *Server) checkOp(c *client, cat uint8, lotID, ent uint64) string {
-	switch cat {
+	switch cat &^ proto.OpTransient {
 	case proto.OpGeneral:
 		if ent != 0 && s.st.Entities[ent] != c.name && !c.admin {
 			return "you do not control that household"
@@ -755,11 +834,48 @@ func (s *Server) snapshot(c *client) {
 	for k, v := range s.st.Shared {
 		c.msg(proto.SShared, (&proto.W{}).Str(k).Bytes(v))
 	}
-	for _, f := range s.oplog {
-		c.send(f)
+	for id, m := range s.st.EntityData {
+		for slot, v := range m {
+			c.msg(proto.SEntityData, (&proto.W{}).U64(id).U8(slot).Bytes(v))
+		}
 	}
-	c.send(s.clockFrame())
-	c.send(proto.Frame(proto.SSnapshotEnd, nil))
+}
+
+// catchUp replays the logged operations after afterSeq and then switches the
+// client to live delivery. The log can be far larger than a send queue, so
+// it is streamed with backpressure and without holding the state lock;
+// operations that arrive meanwhile are picked up by the next round.
+func (s *Server) catchUp(c *client, afterSeq uint64, epoch uint32) {
+	defer s.wg.Done()
+	for {
+		s.mu.Lock()
+		if s.st.Epoch != epoch { // the world was replaced meanwhile: the client must reload
+			s.mu.Unlock()
+			return
+		}
+		i := sort.Search(len(s.oplog), func(i int) bool { return opSeq(s.oplog[i]) > afterSeq })
+		batch := s.oplog[i:]
+		if len(batch) > 512 {
+			batch = batch[:512]
+		}
+		if len(batch) == 0 {
+			if _, here := s.clients[c.id]; here && s.state == proto.StateRunning {
+				c.ready = true
+				c.send(s.clockFrame())
+				c.send(proto.Frame(proto.SSnapshotEnd, nil))
+				s.recalcSpeed()
+			}
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+		for _, f := range batch {
+			if c.sendWait(f) != nil {
+				return
+			}
+			afterSeq = opSeq(f)
+		}
+	}
 }
 
 // --- clock ---------------------------------------------------------------
@@ -820,6 +936,7 @@ func (s *Server) tickLoop() {
 			s.mu.Lock()
 			s.advance(now)
 			s.broadcast(s.clockFrame(), isReady)
+			s.opBuf.Flush()
 			if n++; n%5 == 0 && (s.dirty || s.speed != 0) {
 				s.save()
 			}
