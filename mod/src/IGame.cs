@@ -23,10 +23,15 @@ namespace Sims3MP
         public ulong KeyInstance;    // catalog resource the object is made from
         public float X, Y, Z, FwdX, FwdZ;
         public int Level;
+        public byte[] Design;        // colours/patterns in whatever form the game adapter uses; may be null
 
         public bool Same(ObjState o)
         {
-            return X == o.X && Y == o.Y && Z == o.Z && FwdX == o.FwdX && FwdZ == o.FwdZ && Level == o.Level;
+            if (X != o.X || Y != o.Y || Z != o.Z || FwdX != o.FwdX || FwdZ != o.FwdZ || Level != o.Level) return false;
+            int a = Design == null ? 0 : Design.Length, b = o.Design == null ? 0 : o.Design.Length;
+            if (a != b) return false;
+            for (int i = 0; i < a; i++) if (Design[i] != o.Design[i]) return false;
+            return true;
         }
     }
 
@@ -73,6 +78,16 @@ namespace Sims3MP
         void SetFunds(ulong household, int funds);
         bool ReadMotives(ulong simId, float[] six);
         void ApplyMotives(ulong simId, float[] six);
+
+        // Sim progress, one blob per sim and kind (Msg.SlotSkills, SlotCareer,
+        // SlotMoodlets, SlotRelationships). Only the game adapter knows the format.
+        bool ReadSimData(ulong simId, byte kind, Buf into);
+        void ApplySimData(ulong simId, byte kind, Rd from);
+
+        // The built structure of a lot (walls, floors, roofs, terrain, wall
+        // and floor coverings) as one blob. Read returns false if unsupported.
+        bool ReadLotStructure(ulong lot, Buf into);
+        void ApplyLotStructure(ulong lot, Rd from);
 
         // Build/buy. Ids are local to this client.
         void LotObjects(ulong lot, List<ObjState> into);

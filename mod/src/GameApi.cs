@@ -10,7 +10,11 @@ using System.Reflection;
 using Sims3.Gameplay;
 using Sims3.Gameplay.Abstracts;
 using Sims3.Gameplay.Actors;
+using Sims3.Gameplay.ActorSystems;
 using Sims3.Gameplay.Autonomy;
+using Sims3.Gameplay.Careers;
+using Sims3.Gameplay.Skills;
+using Sims3.Gameplay.Socializing;
 using Sims3.Gameplay.CAS;
 using Sims3.Gameplay.Core;
 using Sims3.Gameplay.Interactions;
@@ -368,6 +372,170 @@ namespace Sims3MP
             for (int i = 0; i < 6; i++) sim.Motives.SetValue(kMotives[i], six[i]);
         }
 
+        // --- skills, careers, moodlets, relationships --------------------
+        //
+        // The owner's game is the authority; these write the owner's values
+        // into this copy of the sim. Formats are private to this file.
+
+        public bool ReadSimData(ulong simId, byte kind, Buf into)
+        {
+            Sim sim = FindSim(simId);
+            if (sim == null) return false;
+            switch (kind)
+            {
+                case Msg.SlotSkills:
+                {
+                    if (sim.SkillManager == null) return false;
+                    int at = into.Length, n = 0;
+                    into.U16(0);
+                    foreach (Skill skill in sim.SkillManager.List.Values)
+                    {
+                        if (skill == null || n == 0xFFFF) continue;
+                        into.U64((ulong)skill.Guid).U32((uint)skill.SkillLevel).F32(skill.SkillPoints);
+                        n++;
+                    }
+                    into.Data[at] = (byte)n; into.Data[at + 1] = (byte)(n >> 8);
+                    return true;
+                }
+                case Msg.SlotCareer:
+                {
+                    Occupation job = sim.Occupation;
+                    into.U64(job == null ? 0UL : (ulong)job.Guid).U32(job == null ? 0u : (uint)job.CareerLevel);
+                    return true;
+                }
+                case Msg.SlotMoodlets:
+                {
+                    if (sim.BuffManager == null) return false;
+                    int at = into.Length, n = 0;
+                    into.U16(0);
+                    foreach (BuffInstance buff in sim.BuffManager.List)
+                    {
+                        if (buff == null || n == 0xFFFF) continue;
+                        into.U64((ulong)buff.Guid);
+                        n++;
+                    }
+                    into.Data[at] = (byte)n; into.Data[at + 1] = (byte)(n >> 8);
+                    return true;
+                }
+                case Msg.SlotRelationships:
+                {
+                    int at = into.Length, n = 0;
+                    into.U16(0);
+                    foreach (Relationship rel in Relationship.GetRelationships(sim.SimDescription))
+                    {
+                        if (rel == null || rel.LTR == null || n == 600) continue;
+                        SimDescription other = rel.GetOtherSimDescription(sim.SimDescription);
+                        if (other == null) continue;
+                        // A relationship has two ends. When the other end is a sim played
+                        // by someone else too, only the lower id publishes it, so the two
+                        // owners never fight over the same value.
+                        ulong otherId = other.SimDescriptionId;
+                        if (simId > otherId && (mRemote.ContainsKey(otherId) || other.Household == sim.Household)) continue;
+                        into.U64(otherId).F32(rel.LTR.Liking).U32((uint)rel.LTR.CurrentLTR);
+                        n++;
+                    }
+                    into.Data[at] = (byte)n; into.Data[at + 1] = (byte)(n >> 8);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        public void ApplySimData(ulong simId, byte kind, Rd from)
+        {
+            Sim sim = FindSim(simId);
+            if (sim == null) return;
+            switch (kind)
+            {
+                case Msg.SlotSkills:
+                {
+                    if (sim.SkillManager == null) return;
+                    int n = from.U16();
+                    for (int i = 0; i < n; i++)
+                    {
+                        SkillNames guid = (SkillNames)from.U64(); int level = (int)from.U32(); float points = from.F32();
+                        if (from.Err) return;
+                        Skill skill = sim.SkillManager.GetElement(guid);
+                        if (skill == null) skill = sim.SkillManager.AddElement(guid);
+                        if (skill == null) continue;
+                        if (skill.SkillLevel != level) skill.ForceSkillLevelUp(level);
+                        skill.SkillPoints = points;
+                    }
+                    break;
+                }
+                case Msg.SlotCareer:
+                {
+                    OccupationNames guid = (OccupationNames)from.U64(); int level = (int)from.U32();
+                    if (from.Err) return;
+                    Occupation job = sim.Occupation;
+                    if (job != null && (guid == OccupationNames.Undefined || job.Guid != guid))
+                    {
+                        job.LeaveJobNow(Career.LeaveJobReason.kQuit);
+                        job = null;
+                    }
+                    if (guid == OccupationNames.Undefined) return;
+                    if (job == null)
+                    {
+                        sim.AcquireOccupation(new AcquireOccupationParameters(guid, false, true));
+                        job = sim.Occupation;
+                    }
+                    // Bounded: a bad level from the network must not loop forever.
+                    for (int i = 0; job != null && job.CareerLevel < level && i < 12; i++) job.PromoteSim();
+                    for (int i = 0; job != null && job.CareerLevel > level && i < 12; i++) job.DemoteSim();
+                    break;
+                }
+                case Msg.SlotMoodlets:
+                {
+                    if (sim.BuffManager == null) return;
+                    int n = from.U16();
+                    Dictionary<ulong, bool> want = new Dictionary<ulong, bool>();
+                    for (int i = 0; i < n; i++) want[from.U64()] = true;
+                    if (from.Err) return;
+                    List<BuffNames> remove = new List<BuffNames>();
+                    foreach (BuffInstance buff in sim.BuffManager.List)
+                    {
+                        if (buff == null) continue;
+                        if (!want.Remove((ulong)buff.Guid)) remove.Add(buff.Guid);
+                    }
+                    foreach (BuffNames guid in remove) sim.BuffManager.RemoveElement(guid);
+                    foreach (ulong guid in want.Keys) sim.BuffManager.AddElement((BuffNames)guid, Origin.None);
+                    break;
+                }
+                case Msg.SlotRelationships:
+                {
+                    int n = from.U16();
+                    for (int i = 0; i < n; i++)
+                    {
+                        ulong otherId = from.U64(); float liking = from.F32(); uint state = from.U32();
+                        if (from.Err) return;
+                        SimDescription other = SimDescription.Find(otherId);
+                        if (other == null) continue;
+                        Relationship rel = Relationship.Get(sim.SimDescription, other, true);
+                        if (rel == null || rel.LTR == null) continue;
+                        if (rel.LTR.Liking != liking) rel.LTR.SetLiking(liking);
+                        if ((uint)rel.LTR.CurrentLTR != state) rel.LTR.ForceChangeState((LongTermRelationshipTypes)state);
+                    }
+                    break;
+                }
+            }
+        }
+
+        // --- lot structure and object design -----------------------------
+        //
+        // NOT IMPLEMENTED on the game side. Everything around these hooks is
+        // done and tested (change detection, permissions, transport, storage,
+        // replay to late joiners): a lot's walls, floors, roofs, terrain and
+        // coverings are one blob, an object's colours/patterns are
+        // ObjState.Design. What is missing is reading them from and writing
+        // them to the game, and the script functions for that could not be
+        // confirmed without the game's assemblies. They are deliberately left
+        // empty rather than filled with guessed function names.
+
+        public bool ReadLotStructure(ulong lot, Buf into) { return false; }
+        public void ApplyLotStructure(ulong lot, Rd from) { }
+        static byte[] ReadDesign(GameObject obj) { return null; }
+        static void ApplyDesign(GameObject obj, byte[] design) { }
+
         // --- build / buy -------------------------------------------------
 
         public void LotObjects(ulong lotId, List<ObjState> into)
@@ -386,6 +554,7 @@ namespace Sims3MP
                 Vector3 p = obj.Position, f = obj.ForwardVector;
                 s.X = p.x; s.Y = p.y; s.Z = p.z; s.FwdX = f.x; s.FwdZ = f.z;
                 s.Level = obj.Level;
+                s.Design = ReadDesign(obj);
                 into.Add(s);
             }
         }
@@ -398,6 +567,7 @@ namespace Sims3MP
             obj.SetPosition(new Vector3(s.X, s.Y, s.Z));
             obj.SetForward(new Vector3(s.FwdX, 0f, s.FwdZ));
             obj.AddToWorld();
+            if (s.Design != null) ApplyDesign(obj, s.Design);
             return obj.ObjectId.Value;
         }
 
@@ -407,6 +577,7 @@ namespace Sims3MP
             if (obj == null || obj is Sim) return;
             obj.SetPosition(new Vector3(s.X, s.Y, s.Z));
             obj.SetForward(new Vector3(s.FwdX, 0f, s.FwdZ));
+            if (s.Design != null) ApplyDesign(obj, s.Design);
         }
 
         public void DestroyObject(ulong id)

@@ -60,6 +60,7 @@ If F9 does nothing, open the cheat console (Ctrl+Shift+C) and type `sims3mp`.
 | **Time** | Normal speed. It jumps to 3x only while *everyone* is asleep. The admin can change it any time. |
 | **Households** | Everyone plays their own. Two players can't control the same one. |
 | **Money and needs** | Follow the player who owns the household, and are restored if you reload. |
+| **Skills, careers, moodlets, relationships** | Same: the owner's game decides, everyone else's copy follows. |
 | **Lots** | Move in and the lot is yours. Only you, builders you appoint (F9 > Lots and builders), and the admin can build there. |
 | **Build/buy** | Furniture and objects you place, move or delete show up for everyone. |
 | **Mods like NRaas** | Allowed. Only the admin gets their menus. |
@@ -97,8 +98,9 @@ the mod's real logic against a real server with a simulated game):
 - hosting, joining, world download, automatic mod install
 - time rules, admin rights, lot ownership and builders
 - households, sim movement and actions being passed between players
-- money and needs sync, including after a reload
-- placing, moving and deleting objects, including two people building at once
+- money, needs, skills, careers, moodlets and relationships, including after a reload
+- placing, moving, recolouring and deleting objects, including two people building at once
+- sending a lot's walls/floors/roofs/terrain to everyone when its builder leaves build mode
 - voice volume by distance
 
 Not working or not proven yet:
@@ -110,10 +112,17 @@ Not working or not proven yet:
 - `setup.ps1`, test mode, the native DLL and the Windows audio code compile
   or are written carefully, but have not been run on Windows.
 - Whether The Sims 3 allows two copies to run at once is unconfirmed.
-- **Walls, floors, roofs, terrain and wallpaper are not synced** — only
-  objects. Object colours/patterns are not synced either.
-- Relationships, skills, careers and moodlets are not synced. Sims do the
-  same actions on every PC, but the results can differ between players.
+- **Walls, floors, roofs, terrain, wallpaper and object colours/patterns:
+  half done.** Everything around them works and is tested (detecting
+  changes, build permissions, sending, storing on the server, restoring for
+  late joiners). The last step — reading them out of the game and writing
+  them back in — is not written, because the game functions for it could
+  not be confirmed without the game's files. Until that is filled in
+  (four small functions in `GameApi.cs`), these do not sync in the game.
+- Skills, careers, moodlets and relationships are written against the game
+  API from memory, like the rest of `GameApi.cs`, and are just as unproven.
+- Not synced at all: inventories, wishes, opportunities, traits, pregnancy
+  and ageing, the family tree, and anything town-wide such as story progression.
 - If the host reloads their own save, they should use *Copy world and start
   hosting* again so everyone gets the same world.
 - 60 fps and under 20 ms is what the design aims for; it has not been measured in the game.

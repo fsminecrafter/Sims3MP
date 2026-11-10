@@ -46,14 +46,14 @@ type lot struct {
 }
 
 type persisted struct {
-	Identities map[string]string           `json:"identities"` // name -> sha256(secret)
-	Lots       map[uint64]*lot             `json:"lots"`
-	Entities   map[uint64]string           `json:"entities"` // household/sim -> owner name
-	Shared     map[string][]byte           `json:"shared"`
-	EntityData map[uint64]map[uint8][]byte `json:"entityData"`
-	SimMillis  uint64                      `json:"simMillis"`
-	Epoch      uint32                      `json:"epoch"`
-	HasWorld   bool                        `json:"hasWorld"`
+	Identities map[string]string            `json:"identities"` // name -> sha256(secret)
+	Lots       map[uint64]*lot              `json:"lots"`
+	Entities   map[uint64]string            `json:"entities"` // household/sim -> owner name
+	Shared     map[string][]byte            `json:"shared"`
+	EntityData map[uint64]map[string][]byte `json:"entityData"` // entity -> "slot:sub" -> value
+	SimMillis  uint64                       `json:"simMillis"`
+	Epoch      uint32                       `json:"epoch"`
+	HasWorld   bool                         `json:"hasWorld"`
 }
 
 type client struct {
@@ -91,6 +91,8 @@ type Server struct {
 	seq     uint64
 	oplog   [][]byte // logged SOp frames of the current epoch, in seq order
 	opFile  *os.File
+	lotData map[uint64]map[uint8][]byte // large per-lot blobs (structure); one file each on disk
+	disk    chan func()                 // serialised background disk writes
 	opBuf   *bufio.Writer
 	files   [2][]proto.FileEntry
 	mode    uint8 // proto.SpeedAuto, or a fixed speed 0..3
@@ -133,7 +135,7 @@ func New(cfg Config) (*Server, error) {
 		}
 	}
 	if s.st.EntityData == nil {
-		s.st.EntityData = map[uint64]map[uint8][]byte{}
+		s.st.EntityData = map[uint64]map[string][]byte{}
 	}
 	if s.st.HasWorld {
 		if err := s.rescan(); err != nil {
@@ -143,6 +145,20 @@ func New(cfg Config) (*Server, error) {
 	}
 	if err := s.openOpLog(!s.st.HasWorld); err != nil {
 		return nil, err
+	}
+	s.lotData = map[uint64]map[uint8][]byte{}
+	s.disk = make(chan func(), 256)
+	if files, err := os.ReadDir(s.lotDir()); err == nil {
+		for _, f := range files {
+			var id uint64
+			var slot uint8
+			if n, _ := fmt.Sscanf(f.Name(), "%d-%d.bin", &id, &slot); n != 2 {
+				continue
+			}
+			if b, err := os.ReadFile(filepath.Join(s.lotDir(), f.Name())); err == nil {
+				s.setLotData(id, slot, b)
+			}
+		}
 	}
 	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
@@ -195,6 +211,25 @@ func (s *Server) openOpLog(truncate bool) error {
 	return nil
 }
 
+func (s *Server) lotDir() string { return filepath.Join(s.cfg.DataDir, "lotdata") }
+
+func (s *Server) setLotData(id uint64, slot uint8, b []byte) {
+	m := s.lotData[id]
+	if m == nil {
+		m = map[uint8][]byte{}
+		s.lotData[id] = m
+	}
+	m[slot] = b
+}
+
+// diskLoop keeps file writes off the paths that hold the state lock.
+func (s *Server) diskLoop() {
+	defer s.wg.Done()
+	for f := range s.disk {
+		f()
+	}
+}
+
 func opSeq(frame []byte) uint64 { return binary.LittleEndian.Uint64(frame[5:]) }
 
 func (s *Server) Addr() string          { return s.ln.Addr().String() }
@@ -216,7 +251,8 @@ func (s *Server) rescan() error {
 
 // Serve runs until Close is called.
 func (s *Server) Serve() error {
-	s.wg.Add(2)
+	s.wg.Add(3)
+	go s.diskLoop()
 	go s.udpLoop()
 	go s.tickLoop()
 	s.cfg.Logf("sims3mp server listening on %s (tcp+udp)", s.Addr())
@@ -255,6 +291,7 @@ func (s *Server) Close() {
 	s.save()
 	s.opBuf.Flush()
 	s.opFile.Close()
+	close(s.disk)
 	s.mu.Unlock()
 	s.wg.Wait()
 }
@@ -502,6 +539,11 @@ func (s *Server) dispatch(c *client, typ uint8, p []byte) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	select {
+	case <-s.closed:
+		return errors.New("server shutting down")
+	default:
+	}
 	switch typ {
 	case proto.CUploadBegin:
 		kind := r.U8()
@@ -546,10 +588,13 @@ func (s *Server) dispatch(c *client, typ uint8, p []byte) error {
 			// save is already baked into the new one.
 			s.st.Epoch++
 			s.st.HasWorld = true
-			s.st.EntityData = map[uint64]map[uint8][]byte{}
+			s.st.EntityData = map[uint64]map[string][]byte{}
 			if err := s.openOpLog(true); err != nil {
 				return err
 			}
+			s.lotData = map[uint64]map[uint8][]byte{}
+			dir := s.lotDir()
+			s.disk <- func() { os.RemoveAll(dir) }
 			for _, o := range s.clients {
 				o.ready = false
 			}
@@ -678,9 +723,9 @@ func (s *Server) dispatch(c *client, typ uint8, p []byte) error {
 			s.entityChanged(id)
 		}
 	case proto.CEntityData:
-		id, slot := r.U64(), r.U8()
+		id, slot, sub := r.U64(), r.U8(), r.U64()
 		val := r.Bytes()
-		if r.Err || slot >= 16 || len(val) > 4096 {
+		if r.Err || slot >= 16 || len(val) > 16<<10 {
 			return errBad
 		}
 		if !c.ready || (s.st.Entities[id] != c.name && !c.admin) {
@@ -688,12 +733,42 @@ func (s *Server) dispatch(c *client, typ uint8, p []byte) error {
 		}
 		m := s.st.EntityData[id]
 		if m == nil {
-			m = map[uint8][]byte{}
+			m = map[string][]byte{}
 			s.st.EntityData[id] = m
 		}
-		m[slot] = val
+		key := fmt.Sprintf("%d:%d", slot, sub)
+		if _, ok := m[key]; !ok && len(m) >= 512 {
+			return nil
+		}
+		m[key] = val
 		s.dirty = true
-		f := proto.Frame(proto.SEntityData, (&proto.W{}).U64(id).U8(slot).Bytes(val).B)
+		f := proto.Frame(proto.SEntityData, (&proto.W{}).U64(id).U8(slot).U64(sub).Bytes(val).B)
+		s.broadcast(f, func(o *client) bool { return o.ready && o != c })
+	case proto.CLotData:
+		id, slot := r.U64(), r.U8()
+		val := r.Bytes()
+		if r.Err || id == 0 || slot >= 8 || len(val) > 900<<10 {
+			return errBad
+		}
+		if !c.ready {
+			return nil
+		}
+		if !s.canBuild(c, id) {
+			c.msg(proto.SOpRejected, (&proto.W{}).U8(proto.OpBuild).U64(id).U64(0).Str("you are not allowed to build on that lot"))
+			return nil
+		}
+		if _, ok := s.lotData[id]; !ok && len(s.lotData) >= 4096 {
+			return nil
+		}
+		s.setLotData(id, slot, val)
+		path := filepath.Join(s.lotDir(), fmt.Sprintf("%d-%d.bin", id, slot))
+		s.disk <- func() {
+			os.MkdirAll(filepath.Dir(path), 0o755)
+			if err := os.WriteFile(path, val, 0o600); err != nil {
+				s.cfg.Logf("saving lot data: %v", err)
+			}
+		}
+		f := proto.Frame(proto.SLotData, (&proto.W{}).U64(id).U8(slot).Bytes(val).B)
 		s.broadcast(f, func(o *client) bool { return o.ready && o != c })
 	case proto.CSetShared:
 		key := r.Str()
@@ -835,8 +910,16 @@ func (s *Server) snapshot(c *client) {
 		c.msg(proto.SShared, (&proto.W{}).Str(k).Bytes(v))
 	}
 	for id, m := range s.st.EntityData {
+		for key, v := range m {
+			var slot uint8
+			var sub uint64
+			fmt.Sscanf(key, "%d:%d", &slot, &sub)
+			c.msg(proto.SEntityData, (&proto.W{}).U64(id).U8(slot).U64(sub).Bytes(v))
+		}
+	}
+	for id, m := range s.lotData {
 		for slot, v := range m {
-			c.msg(proto.SEntityData, (&proto.W{}).U64(id).U8(slot).Bytes(v))
+			c.msg(proto.SLotData, (&proto.W{}).U64(id).U8(slot).Bytes(v))
 		}
 	}
 }

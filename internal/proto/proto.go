@@ -44,7 +44,8 @@ const (
 	CKick        = 21 // str playerName (admin)
 	CSetLotOwner = 22 // u64 lot, str playerName ("" clears) (admin)
 	CReleaseEnt  = 23 // u64 entity
-	CEntityData  = 24 // u64 entity, u8 slot, bytes: latest-wins state of an entity the sender owns
+	CEntityData  = 24 // u64 entity, u8 slot, u64 sub, bytes: latest-wins state of an entity the sender owns
+	CLotData     = 25 // u64 lot, u8 slot, bytes: latest-wins state of a lot the sender may build on
 )
 
 // Server -> client (TCP).
@@ -65,7 +66,8 @@ const (
 	SPong        = 77 // u64 clientTime
 	SNotice      = 78 // str text
 	SSnapshotEnd = 79 // sent after the snapshot that follows CReady
-	SEntityData  = 80 // u64 entity, u8 slot, bytes
+	SEntityData  = 80 // u64 entity, u8 slot, u64 sub, bytes
+	SLotData     = 81 // u64 lot, u8 slot, bytes
 )
 
 // UDP datagram types.

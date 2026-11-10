@@ -62,6 +62,26 @@ Things most likely to need attention in `GameApi.cs`:
 - funds and motives (`Household.FamilyFunds`, `Sim.Motives`)
 - listing a lot's objects, and creating one from a catalog resource key
 
+### Hooks that are still empty
+
+`GameApi.cs` has four functions that do nothing yet, because no script
+function for them could be confirmed:
+
+| Function | Should do |
+|---|---|
+| `ReadLotStructure(lot, into)` | write the lot's walls, floors, roofs, terrain heights/paint and wall/floor coverings into `into`, in any format, and return true |
+| `ApplyLotStructure(lot, from)` | make the lot match such a blob |
+| `ReadDesign(obj)` | return the object's colours/patterns as bytes |
+| `ApplyDesign(obj, design)` | apply them |
+
+The format is private to these functions; the rest of the system treats the
+bytes as opaque, only compares them, and keeps a blob under 900 KB (16 KB
+for a design is plenty; the limit is 60 KB). Two identical lots must produce
+identical bytes, otherwise the blob is re-sent every time.
+
+A relationship is published by the owner of the sim with the lower id when
+both sims are played by people, so two owners never overwrite each other.
+
 To hand the result to players, put `Sims3MP.package` next to the `plugins`
 folder in `dist/client/`; `setup.ps1` installs it from there. Pushing a tag
 `v*` builds a release zip that `setup.ps1` can download.
@@ -90,7 +110,9 @@ What is replicated, and how:
 | Sim positions | UDP, 30 Hz, owner of the household only |
 | Interactions | transient ordered ops (not replayed to late joiners) |
 | Funds + six needs | `CEntityData` slot 1, latest value wins, kept by the server |
-| Objects (create/move/delete) | logged build ops, permission-checked per lot, replayed on join |
+| Skills, career, moodlets, relationships | `CEntityData` slots 2-5, one blob per sim, sent when changed |
+| Objects (create/move/delete/design) | logged build ops, permission-checked per lot, replayed on join |
+| Lot structure (walls, floors, roofs, terrain, coverings) | `CLotData`, one blob per lot, sent on leaving build mode and every 5 s while building; needs build permission |
 
 The op log is stored in `ops.log` and reset when a new world is uploaded.
 Clients send the last sequence number they applied, so a reconnect resumes

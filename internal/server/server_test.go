@@ -168,14 +168,26 @@ func TestOpLogAndEntityData(t *testing.T) {
 	// Needs and money: only the owner of a household may publish its data.
 	const house = 42
 	vitals := func(v string) []byte {
-		return proto.Frame(proto.CEntityData, (&proto.W{}).U64(house).U8(1).Bytes([]byte(v)).B)
+		return proto.Frame(proto.CEntityData, (&proto.W{}).U64(house).U8(1).U64(7).Bytes([]byte(v)).B)
 	}
 	b.Write(vitals("forged")) // Ben does not own it: ignored
 	a.Write(proto.Frame(proto.CClaimEntity, (&proto.W{}).U64(house).B))
 	a.Write(vitals("funds=1500"))
 	r := until(t, b, proto.SEntityData)
-	if r.U64() != house || r.U8() != 1 || string(r.Bytes()) != "funds=1500" {
+	if r.U64() != house || r.U8() != 1 || r.U64() != 7 || string(r.Bytes()) != "funds=1500" {
 		t.Fatal("wrong entity data relayed")
+	}
+
+	// Lot structure: only someone allowed to build there may publish it.
+	const lot = 9
+	structure := proto.Frame(proto.CLotData, (&proto.W{}).U64(lot).U8(1).Bytes([]byte("walls-v1")).B)
+	b.Write(structure)
+	until(t, b, proto.SOpRejected)
+	a.Write(proto.Frame(proto.CClaimLot, (&proto.W{}).U64(lot).B))
+	a.Write(structure)
+	r = until(t, b, proto.SLotData)
+	if r.U64() != lot || r.U8() != 1 || string(r.Bytes()) != "walls-v1" {
+		t.Fatal("wrong lot data relayed")
 	}
 
 	// A transient op is relayed but not recorded; world ops are recorded.
@@ -195,8 +207,12 @@ func TestOpLogAndEntityData(t *testing.T) {
 	c, _, _ := hello(t, s.Addr(), "Cat", "secret-cat", "")
 	c.Write(proto.Frame(proto.CReady, nil))
 	r = until(t, c, proto.SEntityData)
-	if r.U64(); r.U8() != 1 || string(r.Bytes()) != "funds=1500" {
+	if r.U64(); r.U8() != 1 || r.U64() != 7 || string(r.Bytes()) != "funds=1500" {
 		t.Fatal("entity data lost over restart")
+	}
+	r = until(t, c, proto.SLotData)
+	if r.U64() != lot || r.U8() != 1 || string(r.Bytes()) != "walls-v1" {
+		t.Fatal("lot data lost over restart")
 	}
 	var tags []string
 	c.SetReadDeadline(time.Now().Add(3 * time.Second))

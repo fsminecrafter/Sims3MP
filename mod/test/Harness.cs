@@ -86,9 +86,29 @@ sealed class FakeGame : IGame
     public void MoveObject(ulong id, ObjState st)
     {
         int i = Objects.FindIndex(delegate(ObjState o) { return o.Id == id; });
-        if (i >= 0) { st.KeyInstance = Objects[i].KeyInstance; st.Id = id; Objects[i] = st; }
+        if (i >= 0) { st.KeyInstance = Objects[i].KeyInstance; st.Id = id; if (st.Design == null) st.Design = Objects[i].Design; Objects[i] = st; }
     }
     public void DestroyObject(ulong id) { Objects.RemoveAll(delegate(ObjState o) { return o.Id == id; }); }
+
+    // Sim progress and lot structure are opaque blobs to the session.
+    public Dictionary<string, string> SimData = new Dictionary<string, string>();
+    public Dictionary<ulong, string> Structure = new Dictionary<ulong, string>();
+    public bool ReadSimData(ulong sim, byte kind, Buf into)
+    {
+        string v;
+        if (!SimData.TryGetValue(sim + ":" + kind, out v)) return false;
+        into.Str(v);
+        return true;
+    }
+    public void ApplySimData(ulong sim, byte kind, Rd from) { SimData[sim + ":" + kind] = from.Str(); }
+    public bool ReadLotStructure(ulong lot, Buf into)
+    {
+        string v;
+        if (!Structure.TryGetValue(lot, out v)) return false;
+        into.Str(v);
+        return true;
+    }
+    public void ApplyLotStructure(ulong lot, Rd from) { Structure[lot] = from.Str(); }
 
     public void Listener(out float x, out float y, out float z, out float fx, out float fz) { x = y = z = fx = 0; fz = 1; }
     public void RestrictAdminMods(bool restrict) { Restricted = restrict; }
@@ -186,6 +206,23 @@ static class Harness
         Wait("spending shows up for Bob", delegate { return GB.GetFunds(1001) == 900; });
         if (GA.GetFunds(1001) != 900 || GB.GetFunds(1002) != 777) { Console.WriteLine("FAIL: an owner's funds were overwritten"); return 1; }
 
+        // Skills, career, moodlets, relationships follow the owner too.
+        GA.SimData["5001:" + Msg.SlotSkills] = "cooking 3";
+        GA.SimData["5001:" + Msg.SlotCareer] = "medical 2";
+        GA.SimData["5001:" + Msg.SlotMoodlets] = "well rested";
+        GA.SimData["5001:" + Msg.SlotRelationships] = "friend of 6001";
+        Wait("skills, career, moodlets and relationships reach Bob", delegate
+        {
+            string a, b, c, d;
+            return GB.SimData.TryGetValue("5001:" + Msg.SlotSkills, out a) && a == "cooking 3"
+                && GB.SimData.TryGetValue("5001:" + Msg.SlotCareer, out b) && b == "medical 2"
+                && GB.SimData.TryGetValue("5001:" + Msg.SlotMoodlets, out c) && c == "well rested"
+                && GB.SimData.TryGetValue("5001:" + Msg.SlotRelationships, out d) && d == "friend of 6001";
+        });
+        GA.SimData["5001:" + Msg.SlotSkills] = "cooking 4";
+        Wait("a skill gain is passed on", delegate { return GB.SimData["5001:" + Msg.SlotSkills] == "cooking 4"; });
+        if (GA.SimData["5001:" + Msg.SlotSkills] != "cooking 4") { Console.WriteLine("FAIL: owner's skills were overwritten"); return 1; }
+
         // Build/buy: both build on lot 77 at once. Their games hand out the
         // same local object ids, which must not confuse anything.
         GA.CameraLot = 77; GA.BuildMode = true; GB.BuildMode = true;
@@ -200,6 +237,25 @@ static class Harness
         GA.DestroyObject(lampA);
         Wait("deleting an object is replicated", delegate { return GB.Find(0xA11CE) < 0; });
         if (GB.Find(0xB0B) < 0 || GA.Find(0xB0B) < 0) { Console.WriteLine("FAIL: the wrong object was deleted"); return 1; }
+
+        // Colours/patterns: recolouring an object reaches the other player.
+        ObjState painted = GB.Objects[GB.Find(0xB0B)]; painted.Design = new byte[] { 9, 8, 7 }; GB.Objects[GB.Find(0xB0B)] = painted;
+        Wait("an object's design is replicated", delegate
+        {
+            byte[] d = GA.Objects[GA.Find(0xB0B)].Design;
+            return d != null && d.Length == 3 && d[0] == 9 && d[2] == 7;
+        });
+        if (GA.Objects[GA.Find(0xB0B)].X != 7.5f) { Console.WriteLine("FAIL: recolouring moved the object"); return 1; }
+
+        // Walls, floors, roofs, terrain, wallpaper: the lot's structure blob.
+        GA.Structure[77] = "one room"; GB.Structure[77] = "one room";
+        GA.BuildMode = false; GB.BuildMode = false; Pump(200);
+        GB.BuildMode = true; Pump(200);            // Bob enters: baseline, nothing sent
+        GB.Structure[77] = "one room + extension"; // Bob builds a wall
+        GB.BuildMode = false;                      // leaving build mode publishes it
+        Wait("structure changes reach Alice", delegate { return GA.Structure[77] == "one room + extension"; });
+        Pump(300);
+        if (GB.Structure[77] != "one room + extension") { Console.WriteLine("FAIL: structure bounced back"); return 1; }
         GA.BuildMode = false; GB.BuildMode = false;
         Pump(300);
 
@@ -207,13 +263,18 @@ static class Harness
         // server's log, his own funds come back, old interactions do not replay.
         int pushed = GB.Pushed.Count;
         GB.World = false; Pump(200);
-        GB.Objects.Clear(); GB.NextId = 1000; GB.Funds.Clear(); GB.Motives.Clear();
+        GB.Objects.Clear(); GB.NextId = 1000; GB.Funds.Clear(); GB.Motives.Clear(); GB.SimData.Clear(); GB.Structure[77] = "one room";
         GB.World = true;
         Wait("Bob is back after reloading", delegate { return B.InSession; });
         if (GB.Objects.Count != 1 || GB.Find(0xB0B) < 0 || GB.Objects[0].X != 7.5f) { Console.WriteLine("FAIL: build log not replayed correctly (" + GB.Objects.Count + " objects)"); return 1; }
         if (GB.GetFunds(1002) != 777 || GB.GetFunds(1001) != 900) { Console.WriteLine("FAIL: funds not restored after reload"); return 1; }
         if (GB.Pushed.Count != pushed) { Console.WriteLine("FAIL: old interactions were replayed"); return 1; }
+        byte[] design = GB.Objects[0].Design;
+        if (design == null || design.Length != 3) { Console.WriteLine("FAIL: design not restored after reload"); return 1; }
+        if (GB.Structure[77] != "one room + extension") { Console.WriteLine("FAIL: structure not restored after reload"); return 1; }
+        if (!GB.SimData.ContainsKey("5001:" + Msg.SlotSkills) || GB.SimData["5001:" + Msg.SlotSkills] != "cooking 4") { Console.WriteLine("FAIL: skills not restored after reload"); return 1; }
         Console.WriteLine("ok: reload rebuilds objects, restores funds, replays no interactions");
+        Console.WriteLine("ok: reload restores designs, structure and sim progress");
         Pump(1200);
         if (GA.Objects.Count != 1 || GB.Objects.Count != 1) { Console.WriteLine("FAIL: objects duplicated after rejoin"); return 1; }
 

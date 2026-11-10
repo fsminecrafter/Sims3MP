@@ -45,11 +45,11 @@ namespace Sims3MP
     {
         public const byte CReady = 10, COp = 11, CSetSleeping = 12, CSetSpeed = 13, CClaimLot = 14,
             CReleaseLot = 15, CSetBuilder = 16, CClaimEntity = 17, CSetShared = 18, CChat = 19,
-            CKick = 21, CSetLotOwner = 22, CReleaseEntity = 23, CEntityData = 24;
+            CKick = 21, CSetLotOwner = 22, CReleaseEntity = 23, CEntityData = 24, CLotData = 25;
 
         public const byte SWelcome = 64, SPlayerJoin = 66, SPlayerLeave = 67, SState = 69, SClock = 70,
             SOp = 71, SOpRejected = 72, SLot = 73, SEntity = 74, SShared = 75, SChat = 76,
-            SNotice = 78, SSnapshotEnd = 79, SEntityData = 80;
+            SNotice = 78, SSnapshotEnd = 79, SEntityData = 80, SLotData = 81;
 
         public const byte LConnect = 128, LDisconnect = 129, LHostWorld = 130, LState = 131,
             LListener = 132, LVoice = 133, LStartServer = 134, LQuery = 135,
@@ -73,6 +73,12 @@ namespace Sims3MP
 
         // Entity data slots.
         public const byte SlotVitals = 1; // household funds + needs of its sims
+        // Per-sim slots (sub = sim id). The payload format belongs to the game adapter.
+        public const byte SlotSkills = 2, SlotCareer = 3, SlotMoodlets = 4, SlotRelationships = 5;
+        public const byte SimSlotFirst = 2, SimSlotLast = 5;
+
+        // Lot data slots.
+        public const byte LotStructure = 1; // walls, floors, roofs, terrain, wall coverings
     }
 
     /// <summary>Growable little-endian message writer. Byte 0 is the message type.</summary>
@@ -144,6 +150,7 @@ namespace Sims3MP
 
         public Rd(byte[] data, int start, int end) { mData = data; mPos = start; mEnd = end; }
         public int Left { get { return Err ? 0 : mEnd - mPos; } }
+        public Rd Clone() { Rd r = new Rd(mData, mPos, mEnd); r.Err = Err; return r; }
 
         bool Take(int n)
         {

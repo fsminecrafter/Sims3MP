@@ -135,6 +135,11 @@ namespace Sims3.Gameplay.Actors
         public Sims3.Gameplay.Autonomy.Autonomy Autonomy;
         public bool IsSleeping { get { return false; } }
         public Sims3.Gameplay.Autonomy.Motives Motives;
+        public Sims3.Gameplay.Skills.SkillManager SkillManager;
+        public Sims3.Gameplay.ActorSystems.BuffManager BuffManager;
+        public Sims3.Gameplay.Careers.Occupation Occupation;
+        public Sims3.Gameplay.CAS.Household Household;
+        public bool AcquireOccupation(Sims3.Gameplay.Careers.AcquireOccupationParameters p) { return true; }
     }
 }
 
@@ -145,6 +150,7 @@ namespace Sims3.Gameplay.CAS
     {
         public ulong SimDescriptionId;
         public Sim CreatedSim;
+        public Household Household;
         public static SimDescription Find(ulong id) { return null; }
     }
     public class Household
@@ -178,3 +184,69 @@ namespace Sims3.Gameplay.Core
 }
 
 namespace Sims3.Gameplay.Utilities { }
+
+namespace Sims3.Gameplay.Skills
+{
+    public enum SkillNames : ulong { None }
+    public class Skill
+    {
+        public SkillNames Guid;
+        public int SkillLevel;
+        public float SkillPoints;
+        public void ForceSkillLevelUp(int level) { }
+    }
+    public class SkillManager
+    {
+        public Dictionary<ulong, Skill> List = new Dictionary<ulong, Skill>();
+        public Skill GetElement(SkillNames guid) { return null; }
+        public Skill AddElement(SkillNames guid) { return null; }
+    }
+}
+
+namespace Sims3.Gameplay.Careers
+{
+    public enum OccupationNames : ulong { Undefined }
+    public class AcquireOccupationParameters { public AcquireOccupationParameters(OccupationNames guid, bool a, bool b) { } }
+    public class Occupation
+    {
+        public OccupationNames Guid;
+        public int CareerLevel;
+        public void PromoteSim() { }
+        public void DemoteSim() { }
+        public void LeaveJobNow(Career.LeaveJobReason reason) { }
+    }
+    public class Career : Occupation { public enum LeaveJobReason { kQuit } }
+}
+
+namespace Sims3.Gameplay.ActorSystems
+{
+    public enum BuffNames : ulong { Undefined }
+    public enum Origin : ulong { None }
+    public class BuffInstance { public BuffNames Guid; }
+    public class BuffManager
+    {
+        public List<BuffInstance> List = new List<BuffInstance>();
+        public bool AddElement(BuffNames guid, Origin origin) { return true; }
+        public void RemoveElement(BuffNames guid) { }
+    }
+}
+
+namespace Sims3.Gameplay.Socializing
+{
+    using Sims3.Gameplay.CAS;
+    public enum LongTermRelationshipTypes : uint { Undefined }
+    public class LongTermRelationship
+    {
+        public float Liking;
+        public LongTermRelationshipTypes CurrentLTR;
+        public void SetLiking(float v) { }
+        public void ForceChangeState(LongTermRelationshipTypes t) { }
+    }
+    public class Relationship
+    {
+        public LongTermRelationship LTR;
+        public SimDescription GetOtherSimDescription(SimDescription me) { return null; }
+        public static List<Relationship> GetRelationships(SimDescription sim) { return new List<Relationship>(); }
+        public static Relationship Get(SimDescription a, SimDescription b, bool create) { return null; }
+    }
+}

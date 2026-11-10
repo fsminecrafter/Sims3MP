@@ -52,6 +52,17 @@ namespace Sims3MP
         byte[] mLastVitals = new byte[0];
         long mNextVitals, mVitalsForced;
 
+        // Skills, careers, moodlets and relationships: one blob per sim and kind,
+        // visited round-robin and only sent when it changed.
+        readonly Buf mSimData = new Buf();
+        readonly Dictionary<string, byte[]> mLastSimData = new Dictionary<string, byte[]>();
+        int mSimCursor;
+
+        // Last known structure blob per lot (ours or received), to detect changes.
+        readonly Dictionary<ulong, byte[]> mStructure = new Dictionary<ulong, byte[]>();
+        readonly Buf mStructBuf = new Buf();
+        long mNextStructure;
+
         // Build/buy replication. Objects that exist in the hosted save have
         // the same id on every client; objects created during the session
         // are named by the sequence number of the operation that made them.
@@ -185,6 +196,8 @@ namespace Sims3MP
             mSent.Clear();
             mSeen.Clear();
             mLastVitals = new byte[0];
+            mLastSimData.Clear();
+            mStructure.Clear();
             mGame.RestrictAdminMods(false);
         }
 
@@ -283,6 +296,7 @@ namespace Sims3MP
             }
 
             if (house != 0 && house == mClaimed && Now >= mNextVitals) { mNextVitals = Now + 1000; SendVitals(house); }
+            if (house != 0 && house == mClaimed) SendSimData(house, 2);
 
             // Moving a household onto a lot (buying it) makes this player its owner.
             ulong home = mGame.HomeLot;
@@ -335,7 +349,45 @@ namespace Sims3MP
             mVitalsForced = Now + 15000;
             mLastVitals = new byte[mVitals.Length];
             Array.Copy(mVitals.Data, mLastVitals, mVitals.Length);
-            mOut.Begin(Msg.CEntityData).U64(house).U8(Msg.SlotVitals).Bytes(mVitals.Data, mVitals.Length); Send();
+            mOut.Begin(Msg.CEntityData).U64(house).U8(Msg.SlotVitals).U64(0).Bytes(mVitals.Data, mVitals.Length); Send();
+        }
+
+        static bool SameBytes(byte[] a, byte[] b, int bLen)
+        {
+            if (a == null || a.Length != bLen) return false;
+            for (int i = 0; i < bLen; i++) if (a[i] != b[i]) return false;
+            return true;
+        }
+
+        static byte[] Copy(Buf b)
+        {
+            byte[] c = new byte[b.Length];
+            Array.Copy(b.Data, c, b.Length);
+            return c;
+        }
+
+        // Checks the next few (sim, kind) pairs. Spreading the work keeps each
+        // frame cheap: reading a sim's relationships is not free.
+        void SendSimData(ulong house, int budget)
+        {
+            mSims.Clear();
+            mGame.ControlledSims(mSims);
+            int kinds = Msg.SimSlotLast - Msg.SimSlotFirst + 1;
+            int total = mSims.Count * kinds;
+            for (int i = 0; i < budget && total > 0; i++)
+            {
+                if (mSimCursor >= total) mSimCursor = 0;
+                ulong sim = mSims[mSimCursor / kinds].SimId;
+                byte kind = (byte)(Msg.SimSlotFirst + mSimCursor % kinds);
+                mSimCursor++;
+                mSimData.Length = 0;
+                if (!mGame.ReadSimData(sim, kind, mSimData) || mSimData.Length > 16000) continue;
+                string key = sim + ":" + kind;
+                byte[] last;
+                if (mLastSimData.TryGetValue(key, out last) && SameBytes(last, mSimData.Data, mSimData.Length)) continue;
+                mLastSimData[key] = Copy(mSimData);
+                mOut.Begin(Msg.CEntityData).U64(house).U8(kind).U64(sim).Bytes(mSimData.Data, mSimData.Length); Send();
+            }
         }
 
         void ApplyVitals(ulong house, Rd p)
@@ -358,6 +410,9 @@ namespace Sims3MP
         static void WriteObj(Buf b, ObjState o)
         {
             b.U32(o.KeyType).U32(o.KeyGroup).U64(o.KeyInstance).F32(o.X).F32(o.Y).F32(o.Z).F32(o.FwdX).F32(o.FwdZ).U32((uint)o.Level);
+            int n = o.Design == null || o.Design.Length > 60000 ? 0 : o.Design.Length;
+            b.U16((ushort)n);
+            for (int i = 0; i < n; i++) b.U8(o.Design[i]);
         }
 
         static ObjState ReadObj(Rd r)
@@ -366,6 +421,12 @@ namespace Sims3MP
             o.KeyType = r.U32(); o.KeyGroup = r.U32(); o.KeyInstance = r.U64();
             o.X = r.F32(); o.Y = r.F32(); o.Z = r.F32(); o.FwdX = r.F32(); o.FwdZ = r.F32();
             o.Level = (int)r.U32();
+            int n = r.U16();
+            if (n > 0 && r.Left >= n)
+            {
+                o.Design = new byte[n];
+                for (int i = 0; i < n; i++) o.Design[i] = r.U8();
+            }
             return o;
         }
 
@@ -398,7 +459,11 @@ namespace Sims3MP
             if (lot != 0 && !CanBuild(lot)) lot = 0;
             if (lot != mBuildLot)
             {
-                if (mBuildLot != 0) ScanLot(mBuildLot, true); // leaving: publish what is left
+                if (mBuildLot != 0)
+                {
+                    ScanLot(mBuildLot, true); // leaving: publish what is left
+                    PublishStructure(mBuildLot, false);
+                }
                 mBuildLot = lot;
                 mSent.Clear(); mSeen.Clear();
                 if (lot != 0)
@@ -408,10 +473,27 @@ namespace Sims3MP
                     mGame.LotObjects(lot, mScan);
                     for (int i = 0; i < mScan.Count; i++) { mSent[mScan[i].Id] = mScan[i]; mSeen[mScan[i].Id] = mScan[i]; }
                     mNextScan = now + 400;
+                    mNextStructure = now + 5000;
+                    PublishStructure(lot, true);
                 }
                 return;
             }
             if (lot != 0 && now >= mNextScan) { mNextScan = now + 400; ScanLot(lot, false); }
+            if (lot != 0 && now >= mNextStructure) { mNextStructure = now + 5000; PublishStructure(lot, false); }
+        }
+
+        // Walls, floors, roofs, terrain and coverings travel as one blob per
+        // lot, sent when it differs from what everybody already has.
+        void PublishStructure(ulong lot, bool baselineOnly)
+        {
+            mStructBuf.Length = 0;
+            if (!mGame.ReadLotStructure(lot, mStructBuf) || mStructBuf.Length > 900000) return;
+            byte[] last;
+            bool known = mStructure.TryGetValue(lot, out last);
+            if (known && SameBytes(last, mStructBuf.Data, mStructBuf.Length)) return;
+            mStructure[lot] = Copy(mStructBuf);
+            if (baselineOnly) return;
+            mOut.Begin(Msg.CLotData).U64(lot).U8(Msg.LotStructure).Bytes(mStructBuf.Data, mStructBuf.Length); Send();
         }
 
         // Compares the lot with what was last published. Unless final, a change
@@ -612,10 +694,25 @@ namespace Sims3MP
                 case Msg.SEntityData:
                 {
                     ulong ent = r.U64(); byte slot = r.U8();
-                    Rd p = r.Bytes();
                     // Also applies our own household's last published values after a
                     // reload (it is not claimed yet at that point), restoring them.
-                    if (!r.Err && mReadySent && slot == Msg.SlotVitals && ent != mClaimed) ApplyVitals(ent, p);
+                    ulong sub = r.U64();
+                    Rd p = r.Bytes();
+                    if (r.Err || !mReadySent || ent == mClaimed) break;
+                    if (slot == Msg.SlotVitals) ApplyVitals(ent, p);
+                    else if (slot >= Msg.SimSlotFirst && slot <= Msg.SimSlotLast) mGame.ApplySimData(sub, slot, p);
+                    break;
+                }
+                case Msg.SLotData:
+                {
+                    ulong lot = r.U64(); byte slot = r.U8();
+                    Rd p = r.Bytes();
+                    if (r.Err || !mReadySent || slot != Msg.LotStructure) break;
+                    byte[] blob = new byte[p.Left];
+                    Rd copy = p.Clone();
+                    for (int i = 0; i < blob.Length; i++) blob[i] = copy.U8();
+                    mStructure[lot] = blob; // so we do not send it straight back
+                    mGame.ApplyLotStructure(lot, p);
                     break;
                 }
                 case Msg.LStateRelay:
