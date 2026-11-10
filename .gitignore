@@ -2,4 +2,6 @@
 /dist/
 *.exe
 *.dll
+!/prebuilt/client/plugins/*.exe
+!/prebuilt/client/plugins/*.dll
 sims3mp-data/

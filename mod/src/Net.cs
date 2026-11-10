@@ -22,6 +22,29 @@ namespace Sims3MP
         [DllImport("Sims3MPNative.dll")] static extern int MP_Send(byte[] body, int len);
         [DllImport("Sims3MPNative.dll")] static extern int MP_Recv(byte[] buffer, int cap);
         [DllImport("Sims3MPNative.dll")] static extern int MP_Version();
+        [DllImport("Sims3MPNative.dll")] static extern int MP_MenuKey();
+
+        /// <summary>The native interface version this build of the mod needs.</summary>
+        public const int RequiredVersion = 3;
+
+        /// <summary>Native interface version, or -1 if the DLL is missing or not loaded.</summary>
+        public int Version
+        {
+            get
+            {
+                if (mBroken) return -1;
+                try { return MP_Version(); }
+                catch (Exception) { mBroken = true; return -1; }
+            }
+        }
+
+        /// <summary>True once per press of F9 while the game window has focus.</summary>
+        public bool MenuKeyPressed()
+        {
+            if (mBroken) return false;
+            try { return MP_MenuKey() == 1; }
+            catch (Exception) { mBroken = true; return false; }
+        }
 
         bool mBroken;
 
@@ -30,15 +53,28 @@ namespace Sims3MP
         {
             get
             {
-                if (mBroken) return false;
-                try { return MP_Version() >= 1; }
-                catch (Exception) { mBroken = true; return false; }
+                return Version >= RequiredVersion;
             }
         }
 
         public bool Poll() { return !mBroken && MP_Poll() == 1; }
         public bool Send(byte[] body, int len) { return !mBroken && MP_Send(body, len) == 1; }
         public int Recv(byte[] buffer) { return mBroken ? -1 : MP_Recv(buffer, buffer.Length); }
+    }
+
+    /// <summary>Diagnostic log, written by the native DLL to Documents\...\Sims3MP\native.log.
+    /// Script mods cannot write files, so this is the only way to see what the mod did in the game.</summary>
+    public static class DiagLog
+    {
+        [DllImport("Sims3MPNative.dll")] static extern void MP_Log(string text);
+        static bool sBroken;
+
+        public static void Write(string text)
+        {
+            if (sBroken) return;
+            try { MP_Log(text); }
+            catch (Exception) { sBroken = true; }
+        }
     }
 
     public static class Msg

@@ -36,54 +36,67 @@ installed from its own download page; it may not be redistributed.
 
 ## 2. The script mod
 
-This step needs the game and has not been done yet by anyone.
+A built `Sims3MP.package` is kept in `prebuilt/client/`. To rebuild it you
+need the game's script assemblies (`mscorlib`, `System`, `ScriptCore`,
+`SimIFace`, `UI`, `Sims3GameplaySystems`, `Sims3GameplayObjects`) copied
+from `Game\Bin` into a folder **outside this repository** — they are EA's
+files and must never be committed or shared — plus Mono's `mcs`:
 
-1. Create a C# class library targeting .NET Framework 2.0 with "do not
-   reference mscorlib" enabled, as for any Sims 3 script mod.
-2. Reference the game's `mscorlib.dll`, `System.dll`, `ScriptCore.dll`,
-   `SimIFace.dll`, `Sims3GameplaySystems.dll`, `Sims3GameplayObjects.dll`
-   and `UI.dll` (from `Game\Bin`, extracted from the game's packages).
-3. Add every file in `mod/src/`. Do **not** add `mod/stubs/`.
-4. Fix `GameApi.cs` until it compiles: it is the only file that uses game
-   types, and `mod/stubs/Sims3Stubs.cs` lists each member it assumes.
-5. With S3PE create `Sims3MP.package` containing
-   - the assembly as an `S3SA` resource, and
-   - `mod/Sims3MP.Main.xml` as an `_XML` resource whose instance is the
-     FNV-64 hash of `Sims3MP.Main`.
-6. Put the package in `Documents\Electronic Arts\The Sims 3\Mods\Packages`.
+```bash
+GAME_DLLS=/path/to/game-dlls ./scripts/build-mod.sh
+```
 
-Things most likely to need attention in `GameApi.cs`:
+This compiles `mod/src/*.cs` and packs the result with `cmd/sims3mp-pack`.
+`./scripts/build.sh --prebuilt` refreshes the other files in `prebuilt/`.
 
-- the per-frame hook (`WindowBase.Tick`) and the F9 key event
-- reading and setting the game speed
-- detecting build/buy mode and the lot being edited
-- `Sim.IsSleeping`, autonomy on/off for sims played by other people
-- `SaveName` (currently returns "", so players confirm via the F9 menu)
-- funds and motives (`Household.FamilyFunds`, `Sim.Motives`)
-- listing a lot's objects, and creating one from a catalog resource key
+`mod/stubs/Sims3Stubs.cs` holds empty declarations of the game API the mod
+uses, so CI can compile the mod without the game. Keep it in step with
+`GameApi.cs`.
 
-### Hooks that are still empty
+### How the game starts the mod
 
-`GameApi.cs` has four functions that do nothing yet, because no script
-function for them could be confirmed:
+Read from the game's own `TuningControl.FindTunables`: it goes through every
+loaded assembly that carries an **assembly-level `[Tunable]`** attribute, and
+for each static field marked `[Tunable]` it loads an XML named after the
+class and sets the field from `<Current_Tuning><field value="..."/>`. Setting
+the field runs the class's static constructor, which is how `Sims3MP.Main`
+hooks the world-loaded event. Without the assembly attribute nothing starts,
+however correct the XML is. The XML resource key is type `0x0333406C`,
+group 0, instance FNV-64 of the lower-cased class name (also from the game's
+code); `internal/dbpf` writes exactly that.
 
-| Function | Should do |
-|---|---|
-| `ReadLotStructure(lot, into)` | write the lot's walls, floors, roofs, terrain heights/paint and wall/floor coverings into `into`, in any format, and return true |
-| `ApplyLotStructure(lot, from)` | make the lot match such a blob |
-| `ReadDesign(obj)` | return the object's colours/patterns as bytes |
-| `ApplyDesign(obj, design)` | apply them |
+### Diagnosing a run
 
-The format is private to these functions; the rest of the system treats the
-bytes as opaque, only compares them, and keeps a blob under 900 KB (16 KB
-for a design is plenty; the limit is 60 KB). Two identical lots must produce
-identical bytes, otherwise the blob is re-sent every time.
+`native.log` (in `Documents\...\The Sims 3\Sims3MP\`) is written by the
+native DLL; the mod writes into it with `DiagLog.Write` because script mods
+cannot write files. `bridge.log` and `server.log` are next to it.
+
+### If the package does not load
+
+The packer writes the S3SA script resource and DBPF container from their
+publicly described layouts; it was not verified against S3PE output. If the
+game ignores the package, make it the usual way: in S3PE create a package,
+add `build/Sims3MP.dll` as an `S3SA` resource, and import
+`mod/Sims3MP.Main.xml` as `_XML` with instance FNV-64 of `Sims3MP.Main`.
+Sending a known-good script mod package would let the packer be checked.
+
+### What the game does and does not expose
+
+Checked against the real assemblies:
+
+| Wanted | Available to scripts | Used |
+|---|---|---|
+| Object colours/patterns | `ObjectDesigner.GetObjectDesignPreset` / `SetPresetInfo` | yes |
+| Terrain height | `World.GetTerrainHeight` / `LotSetTerrainHeight` | yes, one-unit grid per lot |
+| Roof | `World.LotGetAutoRoofStyle` / `LotSetAutoRoofStyle` / `LotDoAutoRoof` | style only |
+| Walls, floors, coverings | nothing that creates or edits them | no |
+| F9 key | UI reports only keys in its hotkey maps | read by the native shim (`MP_MenuKey`) |
+| Save name | `GameStates.LoadFileName` | yes |
 
 A relationship is published by the owner of the sim with the lower id when
 both sims are played by people, so two owners never overwrite each other.
 
-To hand the result to players, put `Sims3MP.package` next to the `plugins`
-folder in `dist/client/`; `setup.ps1` installs it from there. Pushing a tag
+`setup.ps1` installs from `prebuilt/client/` (or `dist/client/`). Pushing a tag
 `v*` builds a release zip that `setup.ps1` can download.
 
 ## Tests

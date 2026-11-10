@@ -19,11 +19,18 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -H=wi
   -o dist/client/plugins/sims3mp-bridge.exe ./cmd/sims3mp-bridge
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" \
   -o dist/client/plugins/sims3mp-server.exe ./cmd/sims3mp-server
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" \
+  -o dist/client/plugins/sims3mp-bot.exe ./cmd/sims3mp-bot
 if command -v i686-w64-mingw32-g++ >/dev/null; then
   i686-w64-mingw32-g++ -O2 -Wall -shared -static -o dist/client/plugins/Sims3MPNative.dll \
     native/Sims3MPNative.cpp -lws2_32 -Wl,--kill-at
 else
   echo "warning: i686-w64-mingw32-g++ not found, Sims3MPNative.dll not built" >&2
 fi
-echo "The script mod (mod/) must be compiled against the game's own DLLs: see docs/BUILDING.md"
+# The in-game part needs the game's own DLLs to compile (scripts/build-mod.sh),
+# so the last built package is kept in prebuilt/ and shipped from there.
+if [ -f prebuilt/client/Sims3MP.package ]; then cp prebuilt/client/Sims3MP.package dist/client/; fi
+if [ "${1:-}" = "--prebuilt" ]; then
+  mkdir -p prebuilt/client/plugins && cp dist/client/plugins/* prebuilt/client/plugins/
+fi
 ls -l dist/server dist/client/plugins

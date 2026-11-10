@@ -14,6 +14,7 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <vector>
@@ -21,6 +22,74 @@
 #define MP_EXPORT extern "C" __declspec(dllexport)
 
 namespace {
+
+// ---- diagnostic log ------------------------------------------------------
+// <Documents>\...\The Sims 3\Sims3MP\native.log, located through ts3dir.txt
+// (written next to this DLL by setup.ps1). Script mods cannot write files, so
+// the mod logs through MP_Log as well. Low volume: state changes only.
+HMODULE g_self = NULL;
+wchar_t g_logPath[MAX_PATH * 2] = L"";
+bool g_logReady = false;
+
+void InitLogPath() {
+    if (g_logReady) return;
+    g_logReady = true;
+    wchar_t dir[MAX_PATH];
+    DWORD n = GetModuleFileNameW(g_self, dir, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return;
+    wchar_t* slash = wcsrchr(dir, L'\\');
+    if (!slash) return;
+    slash[1] = 0;
+    wchar_t cfg[MAX_PATH + 16];
+    lstrcpyW(cfg, dir);
+    lstrcatW(cfg, L"ts3dir.txt");
+    HANDLE f = CreateFileW(cfg, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    wchar_t base[MAX_PATH] = L"";
+    if (f != INVALID_HANDLE_VALUE) {
+        char buf[1024];
+        DWORD got = 0;
+        ReadFile(f, buf, sizeof buf - 1, &got, NULL);
+        CloseHandle(f);
+        int start = (got >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB && (unsigned char)buf[2] == 0xBF) ? 3 : 0;
+        int end = (int)got;
+        while (end > start && (buf[end - 1] == '\r' || buf[end - 1] == '\n' || buf[end - 1] == ' ')) end--;
+        if (end > start) {
+            int w = MultiByteToWideChar(CP_UTF8, 0, buf + start, end - start, base, MAX_PATH - 2);
+            base[w > 0 ? w : 0] = 0;
+        }
+    }
+    if (base[0] == 0) {
+        GetTempPathW(MAX_PATH, base); // no config: fall back to %TEMP%
+        lstrcpyW(g_logPath, base);
+        lstrcatW(g_logPath, L"sims3mp-native.log");
+        return;
+    }
+    lstrcpyW(g_logPath, base);
+    lstrcatW(g_logPath, L"\\Sims3MP");
+    CreateDirectoryW(g_logPath, NULL);
+    lstrcatW(g_logPath, L"\\native.log");
+}
+
+void Log(const char* fmt, ...) {
+    InitLogPath();
+    if (g_logPath[0] == 0) return;
+    char line[1100];
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    int n = wsprintfA(line, "%02d:%02d:%02d.%03d [%lu] ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, GetCurrentProcessId());
+    va_list ap;
+    va_start(ap, fmt);
+    n += wvsprintfA(line + n, fmt, ap);
+    va_end(ap);
+    if (n > 1090) n = 1090;
+    line[n++] = '\r';
+    line[n++] = '\n';
+    HANDLE f = CreateFileW(g_logPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD wrote;
+    WriteFile(f, line, n, &wrote, NULL);
+    CloseHandle(f);
+}
 
 const unsigned short kDefaultBridgePort = 38921;
 const size_t kMaxFrame = 1 << 20;
@@ -33,7 +102,6 @@ SOCKET g_sock = INVALID_SOCKET;
 bool g_wsa = false;
 DWORD g_lastAttempt = 0;
 DWORD g_lastSpawn = 0;
-HMODULE g_self = NULL;
 std::vector<uint8_t> g_out; // bytes not yet accepted by the socket
 std::vector<uint8_t> g_in;  // bytes received but not yet returned as frames
 
@@ -52,6 +120,7 @@ unsigned short BridgePort() {
 }
 
 void Drop() {
+    if (g_state != Idle) Log("connection to the bridge dropped (state %d)", (int)g_state);
     if (g_sock != INVALID_SOCKET) closesocket(g_sock);
     g_sock = INVALID_SOCKET;
     g_state = Idle;
@@ -82,8 +151,11 @@ void SpawnBridge() {
     ZeroMemory(&si, sizeof si);
     si.cb = sizeof si;
     if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW | DETACHED_PROCESS, NULL, dir, &si, &pi)) {
+        Log("started the bridge (pid %lu) on port %u", pi.dwProcessId, (unsigned)BridgePort());
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
+    } else {
+        Log("could not start sims3mp-bridge.exe: error %lu (is it next to Sims3MPNative.dll?)", GetLastError());
     }
 }
 
@@ -111,6 +183,7 @@ void BeginConnect() {
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (connect(g_sock, (sockaddr*)&a, sizeof a) == 0) {
         g_state = Connected;
+        Log("connected to the bridge");
     } else if (WSAGetLastError() == WSAEWOULDBLOCK) {
         g_state = Connecting;
     } else {
@@ -135,6 +208,7 @@ void PollConnect() {
         SpawnBridge();
     } else if (FD_ISSET(g_sock, &w)) {
         g_state = Connected;
+        Log("connected to the bridge");
     }
 }
 
@@ -213,12 +287,40 @@ MP_EXPORT int __stdcall MP_Recv(uint8_t* buf, int cap) {
     return (int)n;
 }
 
-MP_EXPORT int __stdcall MP_Version() { return 1; }
+// Returns 1 once per press of F9, and only while a window of this process
+// has keyboard focus. The game's script UI cannot see unbound keys.
+MP_EXPORT int __stdcall MP_MenuKey() {
+    static bool wasDown = false;
+    bool down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+    bool pressed = down && !wasDown;
+    wasDown = down;
+    if (!pressed) return 0;
+    DWORD pid = 0;
+    HWND fg = GetForegroundWindow();
+    if (fg) GetWindowThreadProcessId(fg, &pid);
+    bool ours = pid == GetCurrentProcessId();
+    Log("F9 pressed (game window has focus: %s)", ours ? "yes" : "no");
+    return ours ? 1 : 0;
+}
+
+MP_EXPORT void __stdcall MP_Log(const char* text) {
+    if (text) Log("mod: %.900s", text);
+}
+
+MP_EXPORT int __stdcall MP_Version() {
+    static bool first = true;
+    if (first) {
+        first = false;
+        Log("the mod called MP_Version: the game started the mod and found this DLL");
+    }
+    return 3;
+}
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_self = inst;
         DisableThreadLibraryCalls(inst);
+        Log("Sims3MPNative.dll loaded into the game");
     }
     return TRUE;
 }
