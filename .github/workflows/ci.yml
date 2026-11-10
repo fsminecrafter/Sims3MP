@@ -1,0 +1,20 @@
+name: ci
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mono-mcs mono-runtime g++-mingw-w64-i686
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: Compile the script mod against the API stubs
+        run: mkdir -p build && mcs -nologo -target:library -out:build/Sims3MP.dll mod/src/*.cs mod/stubs/Sims3Stubs.cs
+      - run: ./scripts/test-mod.sh
+      - run: ./scripts/build.sh

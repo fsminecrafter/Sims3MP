@@ -1,0 +1,376 @@
+// The only file that touches The Sims 3's own assemblies.
+//
+// IMPORTANT: this file was written without access to the game's DLLs. It is
+// compile-checked only against mod/stubs/Sims3Stubs.cs, which lists every
+// game type and member assumed here. Expect to adjust names/signatures when
+// first building against the real ScriptCore/SimIFace/Sims3GameplaySystems/UI.
+using System;
+using System.Collections.Generic;
+using System.Reflection;
+using Sims3.Gameplay;
+using Sims3.Gameplay.Abstracts;
+using Sims3.Gameplay.Actors;
+using Sims3.Gameplay.CAS;
+using Sims3.Gameplay.Core;
+using Sims3.Gameplay.Interactions;
+using Sims3.Gameplay.Utilities;
+using Sims3.SimIFace;
+using Sims3.UI;
+
+namespace Sims3MP
+{
+    /// <summary>Entry point. The game instantiates this class because of the
+    /// tunable field (the package needs a matching "Sims3MP.Main" tuning XML).</summary>
+    public class Main
+    {
+        [Tunable] protected static bool kInstantiator = false;
+
+        static GameApi sGame;
+        static Session sSession;
+        static Menu sMenu;
+        static bool sCommand, sErrorShown;
+
+        static Main()
+        {
+            World.sOnWorldLoadFinishedEventHandler += new EventHandler(OnWorldLoaded);
+            World.sOnWorldQuitEventHandler += new EventHandler(OnWorldQuit);
+        }
+
+        static void OnWorldLoaded(object sender, EventArgs e)
+        {
+            if (sGame == null)
+            {
+                NativeTransport net = new NativeTransport();
+                sGame = new GameApi();
+                if (!net.Available)
+                {
+                    sGame.Notify("Sims3MP: the native part is not installed (MonoPatcher + Sims3MPNative.dll). Multiplayer is disabled.");
+                    sGame = null;
+                    return;
+                }
+                sSession = new Session(net, sGame);
+                sMenu = new Menu(sSession, sGame);
+            }
+            sGame.WorldLoaded = true;
+
+            WindowBase scene = UIManager.GetSceneWindow();
+            scene.Tick -= OnTick;
+            scene.Tick += OnTick;
+            scene.KeyDown -= OnKeyDown;
+            scene.KeyDown += OnKeyDown;
+            if (!sCommand)
+            {
+                sCommand = true; // cheat console fallback for F9: "sims3mp"
+                CommandSystem.RegisterCommand("sims3mp", "Opens the Sims3MP multiplayer menu.", new CommandHandler(OnCommand));
+            }
+            sGame.Notify("Sims3MP loaded. Press F9 for multiplayer.");
+        }
+
+        static void OnWorldQuit(object sender, EventArgs e)
+        {
+            if (sGame != null) sGame.WorldLoaded = false;
+        }
+
+        // Runs every rendered frame, also while the simulation is paused.
+        static void OnTick(WindowBase sender, UIEventArgs e)
+        {
+            try
+            {
+                sSession.Update();
+                sGame.Tick();
+            }
+            catch (Exception ex)
+            {
+                if (!sErrorShown) { sErrorShown = true; sGame.Notify("Sims3MP error: " + ex); }
+            }
+        }
+
+        static void OnKeyDown(WindowBase sender, UIKeyEventArgs e)
+        {
+            if ((uint)e.KeyCode == 0x78) OpenMenu(); // VK_F9
+        }
+
+        static int OnCommand(object[] parameters) { OpenMenu(); return 1; }
+
+        static void OpenMenu()
+        {
+            if (sGame != null) sGame.RunTask(sMenu.Open); // dialogs must run in a simulator task
+        }
+    }
+
+    public sealed class GameApi : IGame
+    {
+        public bool WorldLoaded;
+
+        readonly Dictionary<ulong, Sim> mSimCache = new Dictionary<ulong, Sim>();
+        readonly Dictionary<ulong, bool> mRemote = new Dictionary<ulong, bool>();
+        bool mRestrict;
+        GameObject[] mScan;
+        int mScanPos;
+        long mNextScan;
+
+        // --- UI ----------------------------------------------------------
+
+        public void Notify(string text)
+        {
+            StyledNotification.Show(new StyledNotification.Format(text, StyledNotification.NotificationStyle.kSystemMessage));
+        }
+        public void RunTask(VoidHandler fn) { Simulator.AddObject(new OneShotFunctionTask(new Function(fn.Invoke))); }
+        public void Message(string title, string text) { SimpleMessageDialog.Show(title, text); }
+        public string Ask(string title, string prompt, string initial) { return StringInputDialog.Show(title, prompt, initial ?? ""); }
+        public bool Confirm(string text) { return TwoButtonDialog.Show(text, "Yes", "No"); }
+
+        // --- world -------------------------------------------------------
+
+        public bool InWorld { get { return WorldLoaded; } }
+
+        // No confirmed script API for the current save's name; the menu offers
+        // "Enter the session" so the player confirms it instead.
+        public string SaveName { get { return ""; } }
+
+        public int Speed
+        {
+            get
+            {
+                switch (Gameflow.CurrentGameSpeed)
+                {
+                    case Gameflow.GameSpeed.Pause: return 0;
+                    case Gameflow.GameSpeed.Normal: return 1;
+                    case Gameflow.GameSpeed.Double: return 2;
+                    default: return 3;
+                }
+            }
+            set
+            {
+                Gameflow.GameSpeed s = value <= 0 ? Gameflow.GameSpeed.Pause
+                    : value == 1 ? Gameflow.GameSpeed.Normal
+                    : value == 2 ? Gameflow.GameSpeed.Double : Gameflow.GameSpeed.Triple;
+                if (Gameflow.CurrentGameSpeed != s) Gameflow.SetGameSpeed(s, Gameflow.SetGameSpeedContext.GameStates);
+            }
+        }
+
+        // --- households --------------------------------------------------
+
+        public ulong ActiveHousehold
+        {
+            get { Household h = Household.ActiveHousehold; return h == null ? 0UL : h.HouseholdId; }
+        }
+
+        public ulong HomeLot
+        {
+            get
+            {
+                Household h = Household.ActiveHousehold;
+                return h == null || h.LotHome == null ? 0UL : h.LotHome.LotId;
+            }
+        }
+
+        public bool AllActiveSimsAsleep
+        {
+            get
+            {
+                Household h = Household.ActiveHousehold;
+                if (h == null) return false;
+                int n = 0;
+                foreach (Sim sim in h.Sims)
+                {
+                    if (sim == null) continue;
+                    if (!sim.IsSleeping) return false;
+                    n++;
+                }
+                return n > 0;
+            }
+        }
+
+        public List<NamedId> Households()
+        {
+            List<NamedId> list = new List<NamedId>();
+            foreach (Household h in Household.sHouseholdList)
+            {
+                if (h == null || h.IsSpecialHousehold || h.LotHome == null || h.Sims.Count == 0) continue;
+                list.Add(new NamedId(h.HouseholdId, h.Name));
+            }
+            return list;
+        }
+
+        public bool SwitchHousehold(ulong householdId)
+        {
+            foreach (Household h in Household.sHouseholdList)
+            {
+                if (h == null || h.HouseholdId != householdId) continue;
+                foreach (Sim sim in h.Sims)
+                {
+                    if (sim != null) { Release(sim); return PlumbBob.ForceSelectActor(sim); }
+                }
+            }
+            return false;
+        }
+
+        // --- lots --------------------------------------------------------
+
+        public bool InBuildBuy { get { return GameStates.IsBuildBuyLikeState; } }
+
+        public ulong BuildLot
+        {
+            get
+            {
+                Lot lot = LotManager.GetLotAtPoint(CameraController.GetTarget());
+                return lot == null || lot.IsWorldLot ? 0UL : lot.LotId;
+            }
+        }
+
+        public void ExitBuildBuy()
+        {
+            InWorldState state = GameStates.GetInWorldState();
+            if (state != null) state.GotoLiveMode();
+        }
+
+        public string LotName(ulong id)
+        {
+            Lot lot = LotManager.GetLot(id);
+            if (lot == null) return "Lot";
+            return string.IsNullOrEmpty(lot.Name) ? lot.Address : lot.Name;
+        }
+
+        // --- sims --------------------------------------------------------
+
+        public void ControlledSims(List<SimState> into)
+        {
+            Household h = Household.ActiveHousehold;
+            if (h == null) return;
+            foreach (Sim sim in h.Sims)
+            {
+                if (sim == null || sim.HasBeenDestroyed || sim.SimDescription == null) continue;
+                SimState s = new SimState();
+                s.SimId = sim.SimDescription.SimDescriptionId;
+                Vector3 p = sim.Position, f = sim.ForwardVector;
+                s.X = p.x; s.Y = p.y; s.Z = p.z; s.FwdX = f.x; s.FwdZ = f.z;
+                s.Interaction = "";
+                InteractionInstance cur = sim.CurrentInteraction;
+                if (cur != null && cur.InteractionDefinition != null)
+                {
+                    Type t = cur.InteractionDefinition.GetType();
+                    s.Interaction = t.FullName + ", " + t.Assembly.GetName().Name;
+                    if (cur.Target != null) s.Target = cur.Target.ObjectId.Value;
+                }
+                into.Add(s);
+            }
+        }
+
+        Sim FindSim(ulong simId)
+        {
+            Sim sim;
+            if (mSimCache.TryGetValue(simId, out sim) && sim != null && !sim.HasBeenDestroyed) return sim;
+            SimDescription desc = SimDescription.Find(simId);
+            sim = desc == null ? null : desc.CreatedSim;
+            if (sim != null) mSimCache[simId] = sim;
+            return sim;
+        }
+
+        // Sims played by someone else must not make their own decisions here.
+        void Hold(ulong simId, Sim sim)
+        {
+            if (mRemote.ContainsKey(simId)) return;
+            mRemote[simId] = true;
+            if (sim.Autonomy != null) sim.Autonomy.IncrementAutonomyDisabled();
+        }
+
+        void Release(Sim sim)
+        {
+            ulong id = sim.SimDescription.SimDescriptionId;
+            if (!mRemote.ContainsKey(id)) return;
+            mRemote.Remove(id);
+            if (sim.Autonomy != null) sim.Autonomy.DecrementAutonomyDisabled();
+        }
+
+        public void ApplyRemoteSim(ulong simId, float x, float y, float z, float fwdX, float fwdZ)
+        {
+            Sim sim = FindSim(simId);
+            if (sim == null) return;
+            Hold(simId, sim);
+            // The sim normally gets where it should by running the replicated
+            // interaction locally; only correct it when it has clearly diverged.
+            Vector3 p = sim.Position;
+            float dx = p.x - x, dy = p.y - y, dz = p.z - z;
+            if (dx * dx + dy * dy + dz * dz < 9f) return;
+            sim.SetPosition(new Vector3(x, y, z));
+            sim.SetForward(new Vector3(fwdX, 0f, fwdZ));
+        }
+
+        public void PushInteraction(ulong simId, string definitionType, ulong targetId)
+        {
+            Sim sim = FindSim(simId);
+            if (sim == null || sim.InteractionQueue == null) return;
+            Hold(simId, sim);
+
+            // The type name comes from another player: accept interaction
+            // definitions only, before touching anything on the type.
+            Type type = Type.GetType(definitionType, false);
+            if (type == null || !typeof(InteractionDefinition).IsAssignableFrom(type)) return;
+            InteractionDefinition def = null;
+            FieldInfo singleton = type.GetField("Singleton", BindingFlags.Public | BindingFlags.Static);
+            if (singleton != null) def = singleton.GetValue(null) as InteractionDefinition;
+            if (def == null && !type.IsAbstract && type.GetConstructor(Type.EmptyTypes) != null)
+                def = Activator.CreateInstance(type) as InteractionDefinition;
+            if (def == null) return;
+
+            IGameObject target = sim;
+            if (targetId != 0 && targetId != sim.ObjectId.Value)
+            {
+                target = GameObject.GetObject<GameObject>(new ObjectGuid(targetId));
+                if (target == null) return; // object does not exist in this copy of the world
+            }
+            InteractionInstance inst = def.CreateInstance(target, sim,
+                new InteractionPriority(InteractionPriorityLevel.UserDirected), false, true);
+            if (inst == null) return;
+            sim.InteractionQueue.CancelAllInteractions();
+            sim.InteractionQueue.Add(inst);
+        }
+
+        public void Listener(out float x, out float y, out float z, out float fwdX, out float fwdZ)
+        {
+            // Voice is heard from where the player is looking, i.e. the camera.
+            Vector3 p = CameraController.GetPosition(), t = CameraController.GetTarget();
+            x = t.x; y = t.y; z = t.z;
+            fwdX = t.x - p.x; fwdZ = t.z - p.z;
+        }
+
+        // --- admin-only mods ---------------------------------------------
+
+        public void RestrictAdminMods(bool restrict)
+        {
+            // Hidden interactions come back on the next world load, which is
+            // also the only time a player's admin status can change.
+            mRestrict = restrict;
+            mScan = null;
+            mNextScan = 0;
+        }
+
+        /// <summary>Per-frame housekeeping with a strict budget (no hitches).</summary>
+        public void Tick()
+        {
+            if (!mRestrict || !WorldLoaded) return;
+            if (mScan == null)
+            {
+                long now = DateTime.UtcNow.Ticks / 10000;
+                if (now < mNextScan) return;
+                mNextScan = now + 30000;
+                mScan = Queries.GetObjects<GameObject>();
+                mScanPos = 0;
+            }
+            for (int i = 0; i < 150 && mScanPos < mScan.Length; i++, mScanPos++)
+            {
+                GameObject obj = mScan[mScanPos];
+                if (obj == null || obj.Interactions == null) continue;
+                List<InteractionObjectPair> list = obj.Interactions;
+                for (int k = list.Count - 1; k >= 0; k--)
+                {
+                    InteractionDefinition def = list[k] == null ? null : list[k].InteractionDefinition;
+                    string ns = def == null ? null : def.GetType().Namespace;
+                    if (ns != null && ns.StartsWith("NRaas")) list.RemoveAt(k);
+                }
+            }
+            if (mScanPos >= mScan.Length) mScan = null;
+        }
+    }
+}

@@ -743,6 +743,9 @@ func (s *Server) entityChanged(id uint64) {
 
 // snapshot brings a client that just loaded the world up to date.
 func (s *Server) snapshot(c *client) {
+	for _, o := range s.clients {
+		c.msg(proto.SPlayerJoin, (&proto.W{}).U32(o.id).Str(o.name).Bool(o.admin))
+	}
 	for id := range s.st.Lots {
 		c.send(s.lotFrame(id))
 	}

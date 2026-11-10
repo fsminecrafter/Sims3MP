@@ -46,6 +46,7 @@ type Bridge struct {
 	phase    uint8
 	text     string
 	playerID uint32
+	name     string
 	admin    bool
 	udpKey   uint64
 	saveName string
@@ -132,7 +133,7 @@ func (b *Bridge) toScript(frame []byte) {
 func (b *Bridge) statusFrame() []byte {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return proto.Frame(proto.LStatus, (&proto.W{}).U8(b.phase).Str(b.text).U32(b.playerID).Bool(b.admin).Str(b.saveName).B)
+	return proto.Frame(proto.LStatus, (&proto.W{}).U8(b.phase).Str(b.text).U32(b.playerID).Bool(b.admin).Str(b.saveName).Str(b.name).B)
 }
 
 func (b *Bridge) setStatus(phase uint8, format string, args ...any) {
@@ -264,7 +265,7 @@ func (b *Bridge) disconnect(why string) {
 		b.udp.Close()
 		b.udp = nil
 	}
-	b.playerID, b.admin, b.saveName, b.hosted = 0, false, "", false
+	b.playerID, b.admin, b.saveName, b.hosted, b.name = 0, false, "", false, ""
 	b.haveList = [2]bool{}
 	b.inSession.Store(false)
 	b.mu.Unlock()
@@ -317,7 +318,7 @@ func (b *Bridge) connect(addr, name, pass string) {
 	b.mu.Lock()
 	b.gen++
 	gen := b.gen
-	b.srv, b.udp, b.playerID, b.admin, b.udpKey = c, u, id, admin, key
+	b.srv, b.udp, b.playerID, b.admin, b.udpKey, b.name = c, u, id, admin, key, name
 	// Non-hosts keep one download folder per server so rejoining is cheap.
 	safe := strings.NewReplacer(":", "_", ".", "_", "[", "", "]", "").Replace(addr)
 	b.saveName = "Sims3MP_" + safe

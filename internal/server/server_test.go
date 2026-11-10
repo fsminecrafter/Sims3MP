@@ -71,3 +71,53 @@ func TestIdentityAndPersistence(t *testing.T) {
 		t.Fatalf("lot ownership not persisted: %+v", s2.st.Lots)
 	}
 }
+
+// The server's share of the latency budget: time from a client sending an
+// operation to every client having it, over loopback.
+func TestRelayLatency(t *testing.T) {
+	s, err := New(Config{Addr: "127.0.0.1:0", DataDir: t.TempDir(), AdminPassword: "pw", Logf: func(string, ...any) {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go s.Serve()
+	defer s.Close()
+	s.mu.Lock()
+	s.state, s.st.HasWorld = proto.StateRunning, true
+	s.mu.Unlock()
+	a, _, _ := hello(t, s.Addr(), "A", "secret-aaaa", "pw")
+	b, _, _ := hello(t, s.Addr(), "B", "secret-bbbb", "")
+	a.Write(proto.Frame(proto.CReady, nil))
+	b.Write(proto.Frame(proto.CReady, nil))
+	b.SetReadDeadline(time.Now().Add(20 * time.Second))
+	go func() { // drain A
+		for {
+			if _, _, err := proto.ReadFrame(a); err != nil {
+				return
+			}
+		}
+	}()
+	const n = 2000
+	var worst, total time.Duration
+	for i := 0; i < n; i++ {
+		start := time.Now()
+		a.Write(proto.Frame(proto.COp, (&proto.W{}).U8(proto.OpWorld).U64(0).U64(0).Bytes(make([]byte, 64)).B))
+		for {
+			typ, _, err := proto.ReadFrame(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if typ == proto.SOp {
+				break
+			}
+		}
+		d := time.Since(start)
+		total += d
+		if d > worst {
+			worst = d
+		}
+	}
+	t.Logf("op relay over loopback: mean %v, worst %v", total/n, worst)
+	if total/n > 5*time.Millisecond {
+		t.Fatalf("relay too slow: mean %v", total/n)
+	}
+}

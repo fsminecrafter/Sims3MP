@@ -9,8 +9,8 @@
 //
 // Every export is non-blocking and is called from the game's own thread.
 //
-// Build:  i686-w64-mingw32-g++ -O2 -shared -static -o Sims3MPNative.dll \
-//             Sims3MPNative.cpp -lws2_32 -Wl,--kill-at
+// Build (one line):
+//   i686-w64-mingw32-g++ -O2 -shared -static -o Sims3MPNative.dll Sims3MPNative.cpp -lws2_32 -Wl,--kill-at
 #include <winsock2.h>
 #include <windows.h>
 #include <stdint.h>

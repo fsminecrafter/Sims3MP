@@ -87,7 +87,7 @@ const (
 	LStartServer = 134 // u16 port: spawn sims3mp-server next to the bridge and connect to it
 	LQuery       = 135 // ask for a fresh LStatus
 
-	LStatus     = 160 // u8 phase, str text, u32 playerID, u8 admin, str saveName
+	LStatus     = 160 // u8 phase, str text, u32 playerID, u8 admin, str saveName, str playerName
 	LStateRelay = 161 // u32 player, u64 entity, payload
 )
 
